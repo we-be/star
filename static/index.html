@@ -65,7 +65,7 @@ canvas { display: block; }
   <span><i class="swatch" style="background:#b0c0ff"></i>B</span>
   <span><i class="swatch" style="background:#8099ff"></i>O</span>
 </div>
-<div id="controls-hint">WASD hop between stars | Scroll zoom | Drag orbit | Click select | Esc galaxy</div>
+<div id="controls-hint">WASD hop stars | Tab cycle planets | Scroll zoom | Drag orbit | Click select | Esc back</div>
 
 <script type="importmap">
 { "imports": {
@@ -956,7 +956,11 @@ function updateHUD() {
   }
 }
 
-function trackDiscovery(planets) {
+const visitedSystems = new Set();
+
+function trackDiscovery(planets, sysIdx) {
+  if (visitedSystems.has(sysIdx)) return; // don't double-count
+  visitedSystems.add(sysIdx);
   discovery.explored++;
   for (const p of planets) {
     if (p.id_parent) discovery.moons++;
@@ -968,6 +972,22 @@ function trackDiscovery(planets) {
     }
   }
   updateHUD();
+
+  // Mark system as visited in point cloud — brighten it with a white ring overlay
+  markVisited(sysIdx);
+}
+
+function markVisited(idx) {
+  // Add a small ring at the system position to mark it as explored
+  const s = systems[idx];
+  const p = sysWorldPos(s);
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(15, 18, 16),
+    new THREE.MeshBasicMaterial({ color: 0x224433, side: THREE.DoubleSide, transparent: true, opacity: 0.4, depthWrite: false })
+  );
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.copy(p);
+  scene.add(ring);
 }
 
 updateHUD();
@@ -1072,7 +1092,7 @@ async function navigateToSystem(idx) {
   addPlanetsToZones(planets, primaryOffsetAU);
   flyTo(targetPos, zoomDist);
   showSystemPanel(sys, starsData, envData, planets);
-  trackDiscovery(planets);
+  trackDiscovery(planets, idx);
   navigating = false;
 }
 
@@ -1194,9 +1214,11 @@ async function showPlanetPanel(planet) {
   const id = planet.id;
 
   // Fetch composition + atmosphere in parallel
-  const [comp, atm] = await Promise.all([
+  const [comp, atm, regions, deposits] = await Promise.all([
     fetch(`${PLANET_API}/planets/${id}/composition`).then(r => r.json()).catch(() => []),
     fetch(`${PLANET_API}/planets/${id}/atmosphere`).then(r => r.json()).catch(() => []),
+    fetch(`${PLANET_API}/planets/${id}/regions`).then(r => r.json()).catch(() => []),
+    fetch(`${PLANET_API}/planets/${id}/deposits`).then(r => r.json()).catch(() => []),
   ]);
 
   const col = rgbHex([planetColor(planet).r, planetColor(planet).g, planetColor(planet).b]);
@@ -1257,6 +1279,49 @@ async function showPlanetPanel(planet) {
       h += `<span style="display:inline-block;width:${Math.min(a.concentration/100,100)}px;height:6px;background:#557;border-radius:3px;margin-right:4px;vertical-align:middle"></span>`;
       h += `${pct}%</span></div>`;
     }
+  }
+
+  // Regions
+  if (regions.length > 0) {
+    h += `<h3>Geography (${regions.length} regions)</h3>`;
+    const biomeCols = {
+      ocean:'#1a4a7a', sea:'#2a5a8a', forest:'#2d5a27', grassland:'#5a7a3a',
+      desert:'#c4a44a', tundra:'#8a9a9a', ice_cap:'#d4dde6', volcanic:'#5a2a1a',
+      barren:'#6a6058', toxic:'#4a5a2a', temperate:'#4a8a4a', tropical:'#2a7a3a',
+      swamp:'#3a5a3a',
+    };
+    for (const r of regions.slice(0, 8)) { // Show top 8 by area
+      const bc = biomeCols[r.biome_name] || '#666';
+      h += `<div style="display:flex;align-items:center;margin:2px 0">`;
+      h += `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${bc};margin-right:6px;flex-shrink:0"></span>`;
+      h += `<span class="label" style="flex:1;font-size:11px">${r.name}</span>`;
+      h += `<span class="val" style="font-size:11px;color:#888">${r.biome_name} ${(r.area_fraction/100).toFixed(0)}%</span>`;
+      h += `</div>`;
+    }
+    if (regions.length > 8) h += `<div style="color:#555;font-size:11px">+${regions.length - 8} more</div>`;
+  }
+
+  // Deposits
+  if (deposits.length > 0) {
+    h += `<h3>Resources (${deposits.length} deposits)</h3>`;
+    // Group by material
+    const byMat = {};
+    for (const d of deposits) {
+      const name = d.material_name;
+      if (!byMat[name]) byMat[name] = { total: 0, count: 0 };
+      byMat[name].total += d.abundance - d.depleted;
+      byMat[name].count++;
+    }
+    const sorted = Object.entries(byMat).sort((a, b) => b[1].total - a[1].total);
+    for (const [name, data] of sorted.slice(0, 8)) {
+      const barW = Math.min(80, data.total / 100);
+      h += `<div class="row" style="font-size:11px">`;
+      h += `<span class="label">${name} (${data.count})</span>`;
+      h += `<span class="val">`;
+      h += `<span style="display:inline-block;width:${barW}px;height:5px;background:#665;border-radius:2px;margin-right:4px;vertical-align:middle"></span>`;
+      h += `${data.total.toLocaleString()}</span></div>`;
+    }
+    if (sorted.length > 8) h += `<div style="color:#555;font-size:11px">+${sorted.length - 8} more</div>`;
   }
 
   // Axial
@@ -1345,6 +1410,21 @@ addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
 
   if (k === 'escape') { flyOut(); return; }
+
+  // Tab: cycle through planets in current system
+  if (e.key === 'Tab' && currentSystemData && currentSystemData.planets.length > 0) {
+    e.preventDefault();
+    const planets = currentSystemData.planets.filter(p => !p.id_parent);
+    if (planets.length === 0) return;
+    // Find current planet index or start at 0
+    const curId = planetGlobeGroup.visible ? (planetGlobeGroup.userData?.planetId || 0) : 0;
+    const curIdx = planets.findIndex(p => p.id === curId);
+    const nextIdx = (curIdx + 1) % planets.length;
+    const next = planets[nextIdx];
+    planetGlobeGroup.userData = { planetId: next.id };
+    showPlanetPanel(next);
+    return;
+  }
 
   // WASD: hop to neighboring star
   if (['w','a','s','d'].includes(k) && selectedIdx >= 0 && !navigating) {
