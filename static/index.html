@@ -830,7 +830,15 @@ function buildGlobeGeometry(globeRadius, regions) {
     }
   }
 
-  // Color each face based on its region's biome
+  // Elevation map: biome → height displacement factor
+  const ELEV = {
+    ocean: -0.03, sea: -0.02, forest: 0.01, grassland: 0.005,
+    desert: 0.008, tundra: 0.01, ice_cap: 0.02, volcanic: 0.03,
+    barren: 0.005, toxic: 0.0, temperate: 0.005, tropical: 0.003,
+    swamp: -0.01, continent: 0.01, plateau: 0.025, island: 0.01,
+  };
+
+  // Color + displace each face based on its region's biome
   for (let f = 0; f < faceCount; f++) {
     const rIdx = regionAssign[f];
     const reg = sortedRegions[rIdx] || sortedRegions[0];
@@ -838,14 +846,37 @@ function buildGlobeGeometry(globeRadius, regions) {
     const hexColor = BIOME_COLORS[biomeName] || BIOME_COLORS.continent;
     const col = new THREE.Color(hexColor);
 
-    // Add subtle per-face color variation for visual interest
     const fc = faceCenters[f];
     const variation = (fbmNoise(fc.x * 8, fc.y * 8, fc.z * 8, 2) - 0.5) * 0.12;
+
+    // Terrain displacement
+    const baseElev = ELEV[biomeName] || 0;
+    const elevNoise = (fbmNoise(fc.x * 6, fc.y * 6, fc.z * 6, 3) - 0.5) * 0.015;
+    const elev = baseElev + elevNoise + (reg.elevation_class || 0) * 0.005;
+
+    // Ocean depth darkening
+    if (baseElev < 0) {
+      const depth = -baseElev + Math.abs(elevNoise);
+      col.r *= (1 - depth * 3);
+      col.g *= (1 - depth * 2);
+      col.b *= (1 - depth * 0.5);
+    }
+
     col.r = Math.max(0, Math.min(1, col.r + variation));
     col.g = Math.max(0, Math.min(1, col.g + variation * 0.8));
     col.b = Math.max(0, Math.min(1, col.b + variation * 0.6));
 
+    // Apply displacement to vertex positions
     for (let v = 0; v < 3; v++) {
+      const pi = f * 9 + v * 3;
+      const nx = positions[pi] / globeRadius;
+      const ny = positions[pi+1] / globeRadius;
+      const nz = positions[pi+2] / globeRadius;
+      const scale = 1 + elev;
+      positions[pi]   = nx * globeRadius * scale;
+      positions[pi+1] = ny * globeRadius * scale;
+      positions[pi+2] = nz * globeRadius * scale;
+
       colors[f*9+v*3]   = col.r;
       colors[f*9+v*3+1] = col.g;
       colors[f*9+v*3+2] = col.b;
@@ -856,6 +887,7 @@ function buildGlobeGeometry(globeRadius, regions) {
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
   geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geo.computeVertexNormals(); // recompute normals after displacement
   return geo;
 }
 
@@ -1103,7 +1135,36 @@ async function createPlanetGlobe(planet) {
   } else if (regions.length > 0) {
     // Terrestrial: biome-colored icosphere
     const globeGeo = buildGlobeGeometry(globeRadius, regions);
-    const globeMat = new THREE.MeshBasicMaterial({ vertexColors: true });
+    // Globe with rim lighting for atmospheric edge glow
+    const globeMat = new THREE.ShaderMaterial({
+      vertexColors: true, transparent: false,
+      uniforms: { rimColor: { value: new THREE.Color(0x4488cc) }, rimPower: { value: 2.0 } },
+      vertexShader: `
+        varying vec3 vColor;
+        varying vec3 vNormal;
+        varying vec3 vViewDir;
+        void main() {
+          vColor = color;
+          vNormal = normalize(normalMatrix * normal);
+          vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+          vViewDir = normalize(-mvPos.xyz);
+          gl_Position = projectionMatrix * mvPos;
+        }`,
+      fragmentShader: `
+        uniform vec3 rimColor;
+        uniform float rimPower;
+        varying vec3 vColor;
+        varying vec3 vNormal;
+        varying vec3 vViewDir;
+        void main() {
+          float rim = 1.0 - max(0.0, dot(vNormal, vViewDir));
+          rim = pow(rim, rimPower) * 0.4;
+          // Simple hemisphere lighting
+          float light = 0.5 + 0.5 * dot(vNormal, normalize(vec3(0.5, 1.0, 0.3)));
+          vec3 col = vColor * light + rimColor * rim;
+          gl_FragColor = vec4(col, 1.0);
+        }`,
+    });
     planetGlobeGroup.add(new THREE.Mesh(globeGeo, globeMat));
     addAtmosphere(planetGlobeGroup, globeRadius, planet);
     if (features.length > 0) addFeatureMarkers(planetGlobeGroup, features, globeRadius);
