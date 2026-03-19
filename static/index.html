@@ -1654,14 +1654,81 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 
+// -- Minimap --
+const minimapCanvas = document.createElement('canvas');
+minimapCanvas.width = 160; minimapCanvas.height = 160;
+minimapCanvas.style.cssText = 'position:absolute;bottom:50px;left:16px;border:1px solid #333;border-radius:4px;opacity:0.6;pointer-events:none;display:none';
+document.body.appendChild(minimapCanvas);
+const mctx = minimapCanvas.getContext('2d');
+
+function drawMinimap() {
+  if (selectedIdx < 0) { minimapCanvas.style.display = 'none'; return; }
+  minimapCanvas.style.display = 'block';
+  const w = minimapCanvas.width, h = minimapCanvas.height;
+  mctx.fillStyle = '#080810';
+  mctx.fillRect(0, 0, w, h);
+
+  // Galaxy bounds: -10000 to 10000 in pos_x/pos_y
+  const scale = w / 22000;
+  const ox = w / 2, oy = h / 2;
+
+  // Draw all systems as tiny dots
+  for (let i = 0; i < systems.length; i++) {
+    const s = systems[i];
+    const sx = ox + s.pos_x * scale;
+    const sy = oy + s.pos_y * scale;
+    if (visitedSystems.has(i)) {
+      mctx.fillStyle = '#2a5a3a';
+    } else {
+      mctx.fillStyle = '#222';
+    }
+    mctx.fillRect(sx, sy, 1, 1);
+  }
+
+  // Draw lanes for selected system
+  const sel = systems[selectedIdx];
+  for (const ni of laneConnections[selectedIdx]) {
+    const n = systems[ni];
+    mctx.strokeStyle = '#335';
+    mctx.lineWidth = 0.5;
+    mctx.beginPath();
+    mctx.moveTo(ox + sel.pos_x * scale, oy + sel.pos_y * scale);
+    mctx.lineTo(ox + n.pos_x * scale, oy + n.pos_y * scale);
+    mctx.stroke();
+  }
+
+  // Draw current position as bright dot
+  mctx.fillStyle = '#4af';
+  mctx.beginPath();
+  mctx.arc(ox + sel.pos_x * scale, oy + sel.pos_y * scale, 3, 0, Math.PI * 2);
+  mctx.fill();
+}
+
 // -- Render loop --
+let lastCamAngle = 0;
 (function animate() {
   requestAnimationFrame(animate);
   controls.update();
+
   // Auto-rotate the planet globe
   if (planetGlobeGroup.visible && planetGlobeGroup.children.length > 0) {
     planetGlobeGroup.rotation.y += 0.002;
   }
+
+  // Refresh lane highlights when camera rotates (check every few frames)
+  if (selectedIdx >= 0 && laneHighlightGroup.visible) {
+    const fwd = new THREE.Vector3();
+    camera.getWorldDirection(fwd);
+    const angle = Math.atan2(fwd.x, fwd.z);
+    if (Math.abs(angle - lastCamAngle) > 0.1) { // >~6 degrees change
+      lastCamAngle = angle;
+      showLaneHighlights(selectedIdx);
+    }
+  }
+
+  // Update minimap
+  drawMinimap();
+
   renderer.render(scene, camera);
 })();
 </script>
