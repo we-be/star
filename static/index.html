@@ -1129,12 +1129,14 @@ function updateHUD() {
 }
 
 const visitedSystems = new Set();
+const visitedOrder = []; // indices in order of exploration
 const visitedInfo = {}; // idx → { planets, bestHab, bestName }
 const discoveryLog = []; // { type, name, detail, score }
 
 function trackDiscovery(planets, sysIdx) {
   if (visitedSystems.has(sysIdx)) return;
   visitedSystems.add(sysIdx);
+  visitedOrder.push(sysIdx);
   discovery.explored++;
 
   const sys = systems[sysIdx];
@@ -1319,8 +1321,10 @@ async function navigateToSystem(idx) {
   // Auto-generate planets if none exist
   let planets = planetsData;
   if (!planets || planets.length === 0) {
+    document.getElementById('hud').textContent = `Generating planets for ${sys.name}...`;
     await fetch(`${PLANET_API}/generate/system/${sys.id}`, { method: 'POST' }).catch(() => null);
     planets = await fetch(`${PLANET_API}/systems/${sys.id}/planets`).then(r => r.json()).catch(() => []);
+    updateHUD();
   }
 
   currentSystemData = { sys, starsData, envData, planets };
@@ -1779,17 +1783,22 @@ function drawMinimap() {
   const scale = w / 22000;
   const ox = w / 2, oy = h / 2;
 
-  // Draw all systems as tiny dots
+  // Draw all systems as tiny dots, colored by discovery status
   for (let i = 0; i < systems.length; i++) {
     const s = systems[i];
     const sx = ox + s.pos_x * scale;
     const sy = oy + s.pos_y * scale;
     if (visitedSystems.has(i)) {
-      mctx.fillStyle = '#2a5a3a';
+      const vi = visitedInfo[i];
+      const hab = vi?.bestHab || 0;
+      if (hab > 7000) mctx.fillStyle = '#4c4';
+      else if (hab > 4000) mctx.fillStyle = '#585';
+      else mctx.fillStyle = '#445';
+      mctx.fillRect(sx - 0.5, sy - 0.5, 2, 2);
     } else {
-      mctx.fillStyle = '#222';
+      mctx.fillStyle = '#1a1a22';
+      mctx.fillRect(sx, sy, 1, 1);
     }
-    mctx.fillRect(sx, sy, 1, 1);
   }
 
   // Draw lanes for selected system
@@ -1801,6 +1810,20 @@ function drawMinimap() {
     mctx.beginPath();
     mctx.moveTo(ox + sel.pos_x * scale, oy + sel.pos_y * scale);
     mctx.lineTo(ox + n.pos_x * scale, oy + n.pos_y * scale);
+    mctx.stroke();
+  }
+
+  // Draw exploration trail
+  if (visitedOrder.length > 1) {
+    mctx.strokeStyle = '#2a3a4a';
+    mctx.lineWidth = 0.8;
+    mctx.beginPath();
+    const first = systems[visitedOrder[0]];
+    mctx.moveTo(ox + first.pos_x * scale, oy + first.pos_y * scale);
+    for (let i = 1; i < visitedOrder.length; i++) {
+      const s = systems[visitedOrder[i]];
+      mctx.lineTo(ox + s.pos_x * scale, oy + s.pos_y * scale);
+    }
     mctx.stroke();
   }
 
