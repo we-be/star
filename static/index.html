@@ -739,6 +739,51 @@ function buildGlobeGeometry(globeRadius, regions) {
   return geo;
 }
 
+// Gas giant: banded sphere using vertex colors based on latitude + noise
+function buildGasGiantGlobe(radius, planet) {
+  const isIce = planet.class_name === 'ice_giant';
+  const geo = new THREE.SphereGeometry(radius, 64, 48);
+  const pos = geo.attributes.position;
+  const colors = new Float32Array(pos.count * 3);
+
+  // Band palette: gas giant = warm browns/tans, ice giant = cool blues/cyans
+  const palette = isIce ? [
+    [0.30, 0.55, 0.70], [0.25, 0.48, 0.65], [0.35, 0.60, 0.72],
+    [0.22, 0.42, 0.58], [0.40, 0.65, 0.75], [0.28, 0.50, 0.68],
+  ] : [
+    [0.85, 0.70, 0.45], [0.75, 0.55, 0.30], [0.90, 0.75, 0.50],
+    [0.65, 0.45, 0.25], [0.80, 0.65, 0.40], [0.70, 0.50, 0.28],
+    [0.55, 0.35, 0.20], [0.88, 0.72, 0.48],
+  ];
+
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i) / radius; // -1 to 1
+    const x = pos.getX(i) / radius;
+    const z = pos.getZ(i) / radius;
+
+    // Latitude-based banding with noise for turbulence
+    const lat = Math.asin(y);
+    const bandFreq = isIce ? 6 : 12;
+    const noise = fbmNoise(x * 4, y * 2, z * 4, 3) * 0.4;
+    const bandVal = Math.sin(lat * bandFreq + noise * 5) * 0.5 + 0.5;
+
+    // Pick color from palette
+    const idx = Math.floor(bandVal * (palette.length - 1));
+    const frac = bandVal * (palette.length - 1) - idx;
+    const c0 = palette[idx];
+    const c1 = palette[Math.min(idx + 1, palette.length - 1)];
+
+    // Interpolate + add noise variation
+    const v = fbmNoise(x * 8 + 10, y * 3, z * 8, 2) * 0.06 - 0.03;
+    colors[i*3]   = Math.max(0, Math.min(1, c0[0] + (c1[0]-c0[0])*frac + v));
+    colors[i*3+1] = Math.max(0, Math.min(1, c0[1] + (c1[1]-c0[1])*frac + v));
+    colors[i*3+2] = Math.max(0, Math.min(1, c0[2] + (c1[2]-c0[2])*frac + v));
+  }
+
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  return new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true }));
+}
+
 // Create feature markers on globe surface
 function addFeatureMarkers(group, features, globeRadius) {
   for (const feat of features) {
@@ -839,27 +884,36 @@ async function createPlanetGlobe(planet) {
     fetch(`${PLANET_API}/planets/${planet.id}/features`).then(r => r.json()).catch(() => []),
   ]);
 
-  // Build globe mesh
-  if (regions.length > 0) {
+  const isGasGiant = planet.class_name === 'gas_giant' || planet.class_name === 'ice_giant';
+
+  if (isGasGiant) {
+    // Gas/ice giants: banded sphere with no surface features
+    const globeMesh = buildGasGiantGlobe(globeRadius, planet);
+    planetGlobeGroup.add(globeMesh);
+
+    // Thick atmosphere
+    const atCol = planet.class_name === 'ice_giant' ? 0x4488bb : 0xcc9955;
+    planetGlobeGroup.add(new THREE.Mesh(
+      new THREE.SphereGeometry(globeRadius * 1.06, 48, 48),
+      new THREE.MeshBasicMaterial({
+        color: atCol, transparent: true, opacity: 0.08,
+        side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
+      })
+    ));
+  } else if (regions.length > 0) {
+    // Terrestrial: biome-colored icosphere
     const globeGeo = buildGlobeGeometry(globeRadius, regions);
     const globeMat = new THREE.MeshBasicMaterial({ vertexColors: true });
-    const globeMesh = new THREE.Mesh(globeGeo, globeMat);
-    planetGlobeGroup.add(globeMesh);
+    planetGlobeGroup.add(new THREE.Mesh(globeGeo, globeMat));
+    addAtmosphere(planetGlobeGroup, globeRadius, planet);
+    if (features.length > 0) addFeatureMarkers(planetGlobeGroup, features, globeRadius);
   } else {
-    // Fallback: solid colored sphere if no regions
-    const col = planetColor(planet);
+    // Fallback: solid sphere
     planetGlobeGroup.add(new THREE.Mesh(
       new THREE.SphereGeometry(globeRadius, 48, 48),
-      new THREE.MeshBasicMaterial({ color: col })
+      new THREE.MeshBasicMaterial({ color: planetColor(planet) })
     ));
-  }
-
-  // Add atmosphere
-  addAtmosphere(planetGlobeGroup, globeRadius, planet);
-
-  // Add feature markers
-  if (features.length > 0) {
-    addFeatureMarkers(planetGlobeGroup, features, globeRadius);
+    addAtmosphere(planetGlobeGroup, globeRadius, planet);
   }
 
   planetGlobeGroup.visible = true;
