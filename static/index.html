@@ -97,7 +97,11 @@ canvas { display: block; }
   <div style="text-align:center;color:#888;margin-bottom:8px;font-size:11px">GALAXY OVERVIEW <span style="float:right;cursor:pointer;color:#555" onclick="this.parentElement.parentElement.style.display='none'">&times;</span></div>
   <div id="galaxy-stats-content"></div>
 </div>
-<div id="controls-hint">WASD hop | Tab planets | / search | R random | L log | G stats | 1-7 filter | Esc back</div>
+<div id="empire-panel" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:420px;background:rgba(8,8,16,0.95);border:1px solid #3a5a3a;border-radius:12px;padding:20px;display:none;font-size:13px;line-height:1.8;z-index:5;max-height:80vh;overflow-y:auto">
+  <div style="text-align:center;color:#4b4;margin-bottom:8px;font-size:11px">MY EMPIRE <span style="float:right;cursor:pointer;color:#555" onclick="this.parentElement.parentElement.style.display='none'">&times;</span></div>
+  <div id="empire-content"></div>
+</div>
+<div id="controls-hint">WASD hop | Tab planets | / search | R random | E empire | L log | G stats | 1-7 filter | Esc back</div>
 
 <script type="importmap">
 { "imports": {
@@ -1245,6 +1249,14 @@ function updateHUD() {
 const visitedSystems = new Set();
 const visitedOrder = []; // indices in order of exploration
 const visitedInfo = {}; // idx → { planets, bestHab, bestName }
+
+// Empire state
+const empire = {
+  claimedPlanets: [], // { id, name, sysIdx, systemName, hab, class_name }
+  settlements: [],    // { name, planetName, region, pop }
+  inventory: {},      // material_name → total mined
+  totalMined: 0,
+};
 const discoveryLog = []; // { type, name, detail, score }
 
 function trackDiscovery(planets, sysIdx) {
@@ -1389,6 +1401,63 @@ function showGalaxyStats() {
 }
 window.showGalaxyStats = showGalaxyStats;
 
+function showEmpirePanel() {
+  const el = document.getElementById('empire-panel');
+  const c = document.getElementById('empire-content');
+  if (el.style.display !== 'none') { el.style.display = 'none'; return; }
+
+  let h = '';
+
+  // Summary
+  const totalPop = empire.settlements.reduce((s, st) => s + st.pop, 0);
+  h += `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px">`;
+  h += `<div style="text-align:center;padding:8px;background:rgba(68,187,102,0.06);border-radius:6px"><div style="font-size:22px;color:#4b4">${empire.claimedPlanets.length}</div><div style="color:#666;font-size:10px">planets</div></div>`;
+  h += `<div style="text-align:center;padding:8px;background:rgba(68,136,170,0.06);border-radius:6px"><div style="font-size:22px;color:#48a">${empire.settlements.length}</div><div style="color:#666;font-size:10px">settlements</div></div>`;
+  h += `<div style="text-align:center;padding:8px;background:rgba(170,136,51,0.06);border-radius:6px"><div style="font-size:22px;color:#a83">${empire.totalMined.toLocaleString()}</div><div style="color:#666;font-size:10px">mined</div></div>`;
+  h += `</div>`;
+
+  // Claimed planets
+  if (empire.claimedPlanets.length > 0) {
+    h += `<div style="color:#4b4;font-size:11px;margin:8px 0 4px">CLAIMED WORLDS</div>`;
+    for (const p of empire.claimedPlanets) {
+      h += `<div style="margin:3px 0;cursor:pointer;font-size:12px" onclick="goToDiscovery(${p.sysIdx},${p.id})">`;
+      h += `<b style="color:#ddd">${p.name}</b> <span style="color:#888">${p.class_name} in ${p.systemName}</span>`;
+      h += `</div>`;
+    }
+  }
+
+  // Settlements
+  if (empire.settlements.length > 0) {
+    h += `<div style="color:#48a;font-size:11px;margin:12px 0 4px">SETTLEMENTS (pop ${totalPop})</div>`;
+    for (const s of empire.settlements) {
+      h += `<div style="margin:2px 0;font-size:12px">`;
+      h += `<b style="color:#ddd">${s.name}</b> <span style="color:#666">${s.region}, ${s.planetName}</span>`;
+      h += `<span style="float:right;color:#888">${s.pop} pop</span>`;
+      h += `</div>`;
+    }
+  }
+
+  // Inventory
+  const invEntries = Object.entries(empire.inventory).sort((a, b) => b[1] - a[1]);
+  if (invEntries.length > 0) {
+    h += `<div style="color:#a83;font-size:11px;margin:12px 0 4px">RESOURCE INVENTORY</div>`;
+    for (const [name, qty] of invEntries) {
+      const barW = Math.min(100, qty / 50);
+      h += `<div class="row" style="font-size:12px;margin:2px 0">`;
+      h += `<span style="color:#ddd">${name}</span>`;
+      h += `<span class="val"><span style="display:inline-block;width:${barW}px;height:5px;background:#a83;border-radius:2px;margin-right:6px;vertical-align:middle"></span>${qty.toLocaleString()}</span>`;
+      h += `</div>`;
+    }
+  }
+
+  if (empire.claimedPlanets.length === 0) {
+    h += `<div style="text-align:center;color:#555;margin:20px 0">No claims yet. Explore and claim a planet to start your empire.</div>`;
+  }
+
+  c.innerHTML = h;
+  el.style.display = 'block';
+}
+
 window.goToDiscovery = async function(sysIdx, planetId) {
   document.getElementById('discoveries').style.display = 'none';
   await navigateToSystem(sysIdx);
@@ -1403,6 +1472,21 @@ window.goToDiscovery = async function(sysIdx, planetId) {
 };
 
 const visitedMarkers = {}; // idx → mesh
+const claimedMarkers = {}; // idx → mesh
+
+function markClaimed(idx) {
+  if (claimedMarkers[idx]) return;
+  const s = systems[idx];
+  const p = sysWorldPos(s);
+  // Bright pulsing diamond shape for claimed systems
+  const geo = new THREE.OctahedronGeometry(25);
+  const mat = new THREE.MeshBasicMaterial({ color: 0x44bb66, transparent: true, opacity: 0.3, wireframe: true, depthWrite: false });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.copy(p);
+  mesh.userData.claimed = true;
+  scene.add(mesh);
+  claimedMarkers[idx] = mesh;
+}
 
 function markVisited(idx, bestHab) {
   const s = systems[idx];
@@ -1672,10 +1756,16 @@ window.claimPlanet = async function(planetId) {
   }).then(r => r.json()).catch(() => null);
   if (res?.status === 'claimed') {
     showNotification('\ud83c\udff4', 'Planet Claimed!', 'This world is now yours', '#44bb66');
-    // Refresh planet data and re-render panel
     const planet = currentSystemData?.planets?.find(p => p.id === planetId);
     if (planet) {
       planet.id_owner = { Valid: true, Int64: 1 };
+      empire.claimedPlanets.push({
+        id: planet.id, name: planet.name, sysIdx: selectedIdx,
+        systemName: systems[selectedIdx]?.name || '?',
+        hab: planet.cached_habitability || 0, class_name: planet.class_name,
+      });
+      // Mark system as claimed in galaxy view
+      markClaimed(selectedIdx);
       await showPlanetPanel(planet);
     }
   }
@@ -1689,13 +1779,14 @@ window.foundSettlement = async function(planetId, regionId, regionName) {
     body: JSON.stringify({region_id: regionId, name})
   }).then(r => r.json()).catch(() => null);
   if (res?.id) {
-    showNotification('\u26fa', `Settlement Founded: ${name}`, `Population: 25 in ${regionName}`, '#4488aa');
     const planet = currentSystemData?.planets?.find(p => p.id === planetId);
+    empire.settlements.push({ name, planetName: planet?.name || '?', region: regionName, pop: 25 });
+    showNotification('\u26fa', `Settlement Founded: ${name}`, `Population: 25 in ${regionName}`, '#4488aa');
     if (planet) await showPlanetPanel(planet);
   }
 };
 
-window.mineDeposit = async function(depositId, planetId) {
+window.mineDeposit = async function(depositId, planetId, materialName) {
   const res = await fetch(`${PLANET_API}/deposits/${depositId}/mine`, {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({amount: 100})
@@ -1704,7 +1795,10 @@ window.mineDeposit = async function(depositId, planetId) {
     showNotification('\u26a0\ufe0f', 'Mining Failed', res.error, '#cc4422');
   } else {
     const remaining = res.abundance - res.depleted;
-    showNotification('\u26cf\ufe0f', `Mined ${res.material_name || 'resource'}`, `Extracted 100 units (${remaining} remaining)`, '#aa8833');
+    const matName = materialName || 'resource';
+    empire.inventory[matName] = (empire.inventory[matName] || 0) + 100;
+    empire.totalMined += 100;
+    showNotification('\u26cf\ufe0f', `Mined ${matName}`, `+100 units (${remaining} remaining)`, '#aa8833');
     const planet = currentSystemData?.planets?.find(p => p.id === planetId);
     if (planet) await showPlanetPanel(planet);
   }
@@ -1878,7 +1972,7 @@ async function showPlanetPanel(planet) {
       h += `<span class="val" style="display:flex;align-items:center;gap:4px">`;
       h += `<span style="display:inline-block;width:${barW}px;height:5px;background:#665;border-radius:2px"></span>`;
       h += `${data.total.toLocaleString()}`;
-      if (owned && data.total > 0) h += ` <span style="cursor:pointer;color:#aa8;font-size:10px" onclick="mineDeposit(${data.bestId},${planet.id})">[mine]</span>`;
+      if (owned && data.total > 0) h += ` <span style="cursor:pointer;color:#aa8;font-size:10px" onclick="mineDeposit(${data.bestId},${planet.id},'${name}')">[mine]</span>`;
       h += `</span></div>`;
     }
     if (sorted.length > 10) h += `<div style="color:#555;font-size:11px">+${sorted.length - 10} more</div>`;
@@ -2145,6 +2239,12 @@ addEventListener('keydown', e => {
     return;
   }
 
+  // E: empire overview
+  if (k === 'e') {
+    showEmpirePanel();
+    return;
+  }
+
   // G: galaxy overview stats
   if (k === 'g' && selectedIdx < 0) {
     showGalaxyStats();
@@ -2350,6 +2450,12 @@ let frameCount = 0;
       mesh.position.x = offsetX + Math.cos(angle) * orbitR;
       mesh.position.z = Math.sin(angle) * orbitR;
     }
+  }
+
+  // Pulse claimed system markers
+  for (const mesh of Object.values(claimedMarkers)) {
+    mesh.rotation.y += 0.005;
+    mesh.material.opacity = 0.2 + Math.sin((time || 0) * 0.003) * 0.1;
   }
 
   // Twinkle stars in galaxy view — subtle size oscillation
