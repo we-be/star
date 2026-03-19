@@ -956,6 +956,60 @@ function addFeatureMarkers(group, features, globeRadius) {
   }
 }
 
+// Settlement markers on globe — glowing beacons
+function addSettlementMarkers(group, settlements, globeRadius) {
+  for (let si = 0; si < settlements.length; si++) {
+    const s = settlements[si];
+    // Deterministic position from settlement name
+    let hash = 0;
+    for (let i = 0; i < s.name.length; i++) hash = ((hash << 5) - hash + s.name.charCodeAt(i)) | 0;
+    const phi = Math.acos(2 * (((hash & 0xffff) ^ (si * 7919)) & 0xffff) / 0xffff - 1);
+    const theta = (((hash >> 16) ^ (si * 6271)) & 0xffff) / 0xffff * Math.PI * 2;
+    const px = globeRadius * Math.sin(phi) * Math.cos(theta);
+    const py = globeRadius * Math.cos(phi);
+    const pz = globeRadius * Math.sin(phi) * Math.sin(theta);
+
+    const isCapital = s.is_capital;
+    const beaconSize = isCapital ? 2.5 : 1.5;
+    const beaconColor = isCapital ? 0xffcc44 : 0x44aaff;
+
+    // Beacon core
+    const core = new THREE.Mesh(
+      new THREE.SphereGeometry(beaconSize, 8, 8),
+      new THREE.MeshBasicMaterial({ color: beaconColor })
+    );
+    const outward = new THREE.Vector3(px, py, pz).normalize();
+    core.position.set(px, py, pz).add(outward.clone().multiplyScalar(beaconSize));
+    group.add(core);
+
+    // Glow
+    const glow = new THREE.Mesh(
+      new THREE.SphereGeometry(beaconSize * 3, 8, 8),
+      new THREE.MeshBasicMaterial({
+        color: beaconColor, transparent: true, opacity: 0.15,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      })
+    );
+    glow.position.copy(core.position);
+    group.add(glow);
+
+    // Label
+    const c = document.createElement('canvas');
+    c.width = 256; c.height = 48;
+    const ctx = c.getContext('2d');
+    ctx.font = `bold ${isCapital ? 22 : 18}px Courier New`;
+    ctx.fillStyle = isCapital ? '#ffcc44' : '#88bbdd';
+    ctx.textAlign = 'center';
+    ctx.fillText(s.name, 128, 32);
+    const sprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false, depthTest: false })
+    );
+    sprite.scale.set(80, 15, 1);
+    sprite.position.copy(core.position).add(outward.clone().multiplyScalar(8));
+    group.add(sprite);
+  }
+}
+
 // Create atmosphere shell
 function addAtmosphere(group, globeRadius, planet) {
   const ws = planet.water_state;
@@ -994,10 +1048,11 @@ async function createPlanetGlobe(planet) {
 
   planetGlobeGroup.position.copy(worldPos);
 
-  // Fetch regions and features
-  const [regions, features] = await Promise.all([
+  // Fetch regions, features, and settlements
+  const [regions, features, globeSettlements] = await Promise.all([
     fetch(`${PLANET_API}/planets/${planet.id}/regions`).then(r => r.json()).catch(() => []),
     fetch(`${PLANET_API}/planets/${planet.id}/features`).then(r => r.json()).catch(() => []),
+    fetch(`${PLANET_API}/planets/${planet.id}/settlements`).then(r => r.json()).catch(() => []),
   ]);
 
   const isGasGiant = planet.class_name === 'gas_giant' || planet.class_name === 'ice_giant';
@@ -1023,6 +1078,7 @@ async function createPlanetGlobe(planet) {
     planetGlobeGroup.add(new THREE.Mesh(globeGeo, globeMat));
     addAtmosphere(planetGlobeGroup, globeRadius, planet);
     if (features.length > 0) addFeatureMarkers(planetGlobeGroup, features, globeRadius);
+    if (globeSettlements.length > 0) addSettlementMarkers(planetGlobeGroup, globeSettlements, globeRadius);
   } else {
     // Fallback: solid sphere
     planetGlobeGroup.add(new THREE.Mesh(
@@ -1073,6 +1129,7 @@ function updateHUD() {
 }
 
 const visitedSystems = new Set();
+const visitedInfo = {}; // idx → { planets, bestHab, bestName }
 const discoveryLog = []; // { type, name, detail, score }
 
 function trackDiscovery(planets, sysIdx) {
@@ -1111,9 +1168,14 @@ function trackDiscovery(planets, sysIdx) {
   // Sort log by score descending
   discoveryLog.sort((a, b) => b.score - a.score);
 
+  // Best habitability in this system
+  const sysBestHab = Math.max(...mainPlanets.map(p => p.cached_habitability || 0), 0);
+  const bestPlanet = mainPlanets.reduce((a, b) => ((a.cached_habitability||0) > (b.cached_habitability||0)) ? a : b, mainPlanets[0]);
+  visitedInfo[sysIdx] = { planets: mainPlanets.length, moons: moons.length, bestHab: sysBestHab, bestName: bestPlanet?.name || '' };
+
   updateHUD();
   updateDiscoveryPanel();
-  markVisited(sysIdx);
+  markVisited(sysIdx, sysBestHab);
 }
 
 function updateDiscoveryPanel() {
@@ -1138,17 +1200,36 @@ window.goToDiscovery = async function(sysIdx, planetId) {
   }
 };
 
-function markVisited(idx) {
-  // Add a small ring at the system position to mark it as explored
+const visitedMarkers = {}; // idx → mesh
+
+function markVisited(idx, bestHab) {
   const s = systems[idx];
   const p = sysWorldPos(s);
+
+  // Remove old marker if re-marking
+  if (visitedMarkers[idx]) {
+    scene.remove(visitedMarkers[idx]);
+  }
+
+  // Color by best habitability found in this system
+  const hab = bestHab || 0;
+  let color, opacity, size;
+  if (hab > 7000) {
+    color = 0x33cc55; opacity = 0.6; size = [18, 22]; // bright green — habitable!
+  } else if (hab > 4000) {
+    color = 0x557733; opacity = 0.4; size = [15, 18]; // muted — marginal
+  } else {
+    color = 0x333344; opacity = 0.3; size = [12, 15]; // dim — barren
+  }
+
   const ring = new THREE.Mesh(
-    new THREE.RingGeometry(15, 18, 16),
-    new THREE.MeshBasicMaterial({ color: 0x224433, side: THREE.DoubleSide, transparent: true, opacity: 0.4, depthWrite: false })
+    new THREE.RingGeometry(size[0], size[1], 16),
+    new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide, transparent: true, opacity, depthWrite: false })
   );
   ring.rotation.x = -Math.PI / 2;
   ring.position.copy(p);
   scene.add(ring);
+  visitedMarkers[idx] = ring;
 }
 
 updateHUD();
@@ -1198,8 +1279,16 @@ renderer.domElement.addEventListener('pointermove', e => {
     tooltip.style.left = (e.clientX + 14) + 'px';
     tooltip.style.top = (e.clientY + 14) + 'px';
     const explored = visitedSystems.has(idx);
-    const explTag = explored ? ' <span style="color:#4a7">explored</span>' : ' <span style="color:#666">unexplored</span>';
-    tooltip.innerHTML = `<b>${s.name}</b>${explTag}<br>${s._count > 1 ? 'Binary' : 'Single'} | dist ${s.dist}`;
+    let explLine = '';
+    if (explored && visitedInfo[idx]) {
+      const vi = visitedInfo[idx];
+      const habPct = (vi.bestHab / 100).toFixed(0);
+      const habCol = vi.bestHab > 7000 ? '#4b4' : vi.bestHab > 4000 ? '#aa8' : '#888';
+      explLine = `<br><span style="color:#4a7">${vi.planets} planets</span> | best: <span style="color:${habCol}">${vi.bestName} ${habPct}%</span>`;
+    } else {
+      explLine = `<br><span style="color:#666">unexplored</span>`;
+    }
+    tooltip.innerHTML = `<b>${s.name}</b> ${s._count > 1 ? '<span style="color:#668">binary</span>' : ''}<br>dist ${s.dist}${explLine}`;
     renderer.domElement.style.cursor = 'pointer';
   } else {
     tooltip.style.display = 'none';
