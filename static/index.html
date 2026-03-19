@@ -80,12 +80,23 @@ canvas { display: block; }
   <span><i class="swatch" style="background:#b0c0ff"></i>B</span>
   <span><i class="swatch" style="background:#8099ff"></i>O</span>
 </div>
+<div id="search-box" style="position:absolute;top:50px;left:50%;transform:translateX(-50%);display:none;z-index:10">
+  <input id="search-input" type="text" placeholder="Search systems..." style="
+    width:300px;padding:8px 14px;background:rgba(8,8,16,0.95);color:#eee;
+    border:1px solid #444;border-radius:6px;font-family:inherit;font-size:14px;
+    outline:none;
+  ">
+  <div id="search-results" style="
+    max-height:200px;overflow-y:auto;margin-top:4px;background:rgba(8,8,16,0.95);
+    border:1px solid #333;border-radius:6px;display:none;
+  "></div>
+</div>
 <div id="notif-container" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);pointer-events:none;z-index:10"></div>
 <div id="galaxy-stats" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:400px;background:rgba(8,8,16,0.95);border:1px solid #333;border-radius:12px;padding:20px;display:none;font-size:13px;line-height:1.8;z-index:5">
   <div style="text-align:center;color:#888;margin-bottom:8px;font-size:11px">GALAXY OVERVIEW <span style="float:right;cursor:pointer;color:#555" onclick="this.parentElement.parentElement.style.display='none'">&times;</span></div>
   <div id="galaxy-stats-content"></div>
 </div>
-<div id="controls-hint">WASD hop | Tab planets | R random | L log | 1-7 filter OBAFGKM | 0 clear | Esc back</div>
+<div id="controls-hint">WASD hop | Tab planets | / search | R random | L log | G stats | 1-7 filter | Esc back</div>
 
 <script type="importmap">
 { "imports": {
@@ -1929,6 +1940,73 @@ function flyOut() {
 }
 window.flyOut = flyOut;
 
+// -- Search --
+let searchOpen = false;
+
+function openSearch() {
+  searchOpen = true;
+  const box = document.getElementById('search-box');
+  const input = document.getElementById('search-input');
+  const results = document.getElementById('search-results');
+  box.style.display = 'block';
+  input.value = '';
+  results.style.display = 'none';
+  input.focus();
+
+  input.oninput = () => {
+    const q = input.value.toLowerCase().trim();
+    if (q.length < 2) { results.style.display = 'none'; return; }
+
+    const matches = [];
+    for (let i = 0; i < systems.length; i++) {
+      if (systems[i].name.toLowerCase().includes(q)) {
+        matches.push(i);
+        if (matches.length >= 10) break;
+      }
+    }
+
+    if (matches.length === 0) {
+      results.innerHTML = '<div style="padding:8px;color:#666;font-size:12px">No matches</div>';
+    } else {
+      results.innerHTML = matches.map(i => {
+        const s = systems[i];
+        const visited = visitedSystems.has(i);
+        const tag = visited ? `<span style="color:#4a7;font-size:10px">explored</span>` : '';
+        return `<div style="padding:6px 12px;cursor:pointer;font-size:13px;border-bottom:1px solid #222" onmousedown="searchNav(${i})">
+          <b style="color:#ddd">${s.name}</b> ${tag}
+          <span style="color:#666;float:right">dist ${s.dist}</span>
+        </div>`;
+      }).join('');
+    }
+    results.style.display = 'block';
+  };
+
+  input.onkeydown = (ev) => {
+    if (ev.key === 'Escape') { closeSearch(); return; }
+    if (ev.key === 'Enter') {
+      const q = input.value.toLowerCase().trim();
+      for (let i = 0; i < systems.length; i++) {
+        if (systems[i].name.toLowerCase().includes(q)) {
+          closeSearch();
+          navigateToSystem(i);
+          return;
+        }
+      }
+    }
+  };
+}
+
+function closeSearch() {
+  searchOpen = false;
+  document.getElementById('search-box').style.display = 'none';
+  document.getElementById('search-results').style.display = 'none';
+}
+
+window.searchNav = function(idx) {
+  closeSearch();
+  navigateToSystem(idx);
+};
+
 // -- Spectral type filter --
 let activeFilter = null;
 
@@ -1990,7 +2068,20 @@ const wasdCooldown = {};
 addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
 
-  if (k === 'escape') { flyOut(); return; }
+  if (k === 'escape') {
+    if (searchOpen) { closeSearch(); return; }
+    // If viewing a planet globe, go back to system first
+    if (planetGlobeGroup.visible) { backToSystem(); return; }
+    flyOut();
+    return;
+  }
+
+  // /: open search
+  if (k === '/' && !searchOpen) {
+    e.preventDefault();
+    openSearch();
+    return;
+  }
 
   // G: galaxy overview stats
   if (k === 'g' && selectedIdx < 0) {
