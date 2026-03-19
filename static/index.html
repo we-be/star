@@ -1665,6 +1665,51 @@ function showSystemPanel(sys, stars, env, planets) {
   p.style.display = 'block';
 }
 
+window.claimPlanet = async function(planetId) {
+  const res = await fetch(`${PLANET_API}/planets/${planetId}/claim`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({owner_id: 1})
+  }).then(r => r.json()).catch(() => null);
+  if (res?.status === 'claimed') {
+    showNotification('\ud83c\udff4', 'Planet Claimed!', 'This world is now yours', '#44bb66');
+    // Refresh planet data and re-render panel
+    const planet = currentSystemData?.planets?.find(p => p.id === planetId);
+    if (planet) {
+      planet.id_owner = { Valid: true, Int64: 1 };
+      await showPlanetPanel(planet);
+    }
+  }
+};
+
+window.foundSettlement = async function(planetId, regionId, regionName) {
+  const name = prompt(`Name your settlement in ${regionName}:`, `New ${regionName.split(' ')[0]}`);
+  if (!name) return;
+  const res = await fetch(`${PLANET_API}/planets/${planetId}/settle`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({region_id: regionId, name})
+  }).then(r => r.json()).catch(() => null);
+  if (res?.id) {
+    showNotification('\u26fa', `Settlement Founded: ${name}`, `Population: 25 in ${regionName}`, '#4488aa');
+    const planet = currentSystemData?.planets?.find(p => p.id === planetId);
+    if (planet) await showPlanetPanel(planet);
+  }
+};
+
+window.mineDeposit = async function(depositId, planetId) {
+  const res = await fetch(`${PLANET_API}/deposits/${depositId}/mine`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({amount: 100})
+  }).then(r => r.json()).catch(e => ({error: 'failed'}));
+  if (res?.error) {
+    showNotification('\u26a0\ufe0f', 'Mining Failed', res.error, '#cc4422');
+  } else {
+    const remaining = res.abundance - res.depleted;
+    showNotification('\u26cf\ufe0f', `Mined ${res.material_name || 'resource'}`, `Extracted 100 units (${remaining} remaining)`, '#aa8833');
+    const planet = currentSystemData?.planets?.find(p => p.id === planetId);
+    if (planet) await showPlanetPanel(planet);
+  }
+};
+
 window.clickPlanet = async function(id) {
   // Find the planet in currentSystemData
   const planet = currentSystemData?.planets?.find(p => p.id === id);
@@ -1707,6 +1752,12 @@ async function showPlanetPanel(planet) {
   let h = `<span class="close" onclick="backToSystem()">&times;</span>`;
   h += `<div style="margin-bottom:8px">${btn('&#8592; System', 'backToSystem()')}</div>`;
   h += `<h2 style="color:${col}">${planet.name}</h2>`;
+  const owned = planet.id_owner?.Valid;
+  if (!owned && planet.class_name !== 'gas_giant' && planet.class_name !== 'ice_giant') {
+    h += `<div style="margin:6px 0"><button onclick="claimPlanet(${planet.id})" style="background:#1a2a1a;color:#4b4;border:1px solid #3a5a3a;padding:6px 14px;border-radius:4px;cursor:pointer;font-family:inherit;font-size:12px;width:100%">Claim Planet</button></div>`;
+  } else if (owned) {
+    h += `<div style="margin:4px 0;padding:4px 8px;background:rgba(68,187,102,0.08);border-radius:4px;text-align:center;color:#4b4;font-size:11px">CLAIMED</div>`;
+  }
   h += `<div class="row"><span class="label">Class</span><span class="val">${planet.class_name}</span></div>`;
   h += `<div class="row"><span class="label">Orbit</span><span class="val">${fmt(planet.semi_major_axis,'AU',1000)} | e=${(planet.eccentricity/10000).toFixed(3)}</span></div>`;
 
@@ -1769,11 +1820,14 @@ async function showPlanetPanel(planet) {
       barren:'#6a6058', toxic:'#4a5a2a', temperate:'#4a8a4a', tropical:'#2a7a3a',
       swamp:'#3a5a3a',
     };
-    for (const r of regions.slice(0, 8)) { // Show top 8 by area
+    const isLandType = n => !['ocean','sea'].includes(n);
+    for (const r of regions.slice(0, 8)) {
       const bc = biomeCols[r.biome_name] || '#666';
+      const canSettle = isLandType(r.biome_name) && owned;
       h += `<div style="display:flex;align-items:center;margin:2px 0">`;
       h += `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${bc};margin-right:6px;flex-shrink:0"></span>`;
       h += `<span class="label" style="flex:1;font-size:11px">${r.name}</span>`;
+      if (canSettle) h += `<span style="cursor:pointer;color:#4a8;font-size:10px;margin-right:6px" onclick="foundSettlement(${planet.id},${r.id},'${r.name.replace(/'/g,'')}')">[settle]</span>`;
       h += `<span class="val" style="font-size:11px;color:#888">${r.biome_name} ${(r.area_fraction/100).toFixed(0)}%</span>`;
       h += `</div>`;
     }
@@ -1803,24 +1857,31 @@ async function showPlanetPanel(planet) {
   // Deposits
   if (deposits.length > 0) {
     h += `<h3>Resources (${deposits.length} deposits)</h3>`;
-    // Group by material
+    // Group by material with top deposit IDs for mining
     const byMat = {};
     for (const d of deposits) {
       const name = d.material_name;
-      if (!byMat[name]) byMat[name] = { total: 0, count: 0 };
-      byMat[name].total += d.abundance - d.depleted;
+      const remaining = d.abundance - d.depleted;
+      if (!byMat[name]) byMat[name] = { total: 0, count: 0, bestId: d.id, bestRemain: 0 };
+      byMat[name].total += remaining;
       byMat[name].count++;
+      if (remaining > byMat[name].bestRemain) {
+        byMat[name].bestId = d.id;
+        byMat[name].bestRemain = remaining;
+      }
     }
     const sorted = Object.entries(byMat).sort((a, b) => b[1].total - a[1].total);
-    for (const [name, data] of sorted.slice(0, 8)) {
+    for (const [name, data] of sorted.slice(0, 10)) {
       const barW = Math.min(80, data.total / 100);
-      h += `<div class="row" style="font-size:11px">`;
+      h += `<div class="row" style="font-size:11px;margin:1px 0">`;
       h += `<span class="label">${name} (${data.count})</span>`;
-      h += `<span class="val">`;
-      h += `<span style="display:inline-block;width:${barW}px;height:5px;background:#665;border-radius:2px;margin-right:4px;vertical-align:middle"></span>`;
-      h += `${data.total.toLocaleString()}</span></div>`;
+      h += `<span class="val" style="display:flex;align-items:center;gap:4px">`;
+      h += `<span style="display:inline-block;width:${barW}px;height:5px;background:#665;border-radius:2px"></span>`;
+      h += `${data.total.toLocaleString()}`;
+      if (owned && data.total > 0) h += ` <span style="cursor:pointer;color:#aa8;font-size:10px" onclick="mineDeposit(${data.bestId},${planet.id})">[mine]</span>`;
+      h += `</span></div>`;
     }
-    if (sorted.length > 8) h += `<div style="color:#555;font-size:11px">+${sorted.length - 8} more</div>`;
+    if (sorted.length > 10) h += `<div style="color:#555;font-size:11px">+${sorted.length - 10} more</div>`;
   }
 
   // Axial
