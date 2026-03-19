@@ -1016,6 +1016,7 @@ function addAtmosphere(group, globeRadius, planet) {
   const atCol = ws === 1 ? 0x4488cc : ws === 3 ? 0xcc8844 : 0x6688aa;
   const atOpacity = Math.min(0.15, (planet.atm_pressure || 0) / 20000);
   if (atOpacity > 0.01) {
+    // Atmosphere glow
     group.add(new THREE.Mesh(
       new THREE.SphereGeometry(globeRadius * 1.04, 48, 48),
       new THREE.MeshBasicMaterial({
@@ -1023,6 +1024,30 @@ function addAtmosphere(group, globeRadius, planet) {
         side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
       })
     ));
+
+    // Cloud layer — procedural vertex-colored sphere with patchy opacity
+    if (planet.atm_pressure > 200 && planet.water_state > 0) {
+      const cloudGeo = new THREE.SphereGeometry(globeRadius * 1.02, 48, 48);
+      const cloudColors = new Float32Array(cloudGeo.attributes.position.count * 4);
+      const pos = cloudGeo.attributes.position;
+      for (let i = 0; i < pos.count; i++) {
+        const x = pos.getX(i) / globeRadius;
+        const y = pos.getY(i) / globeRadius;
+        const z = pos.getZ(i) / globeRadius;
+        // Patchy clouds using noise
+        const n = fbmNoise(x * 3, y * 2 + 0.5, z * 3, 4);
+        const cloudPresence = n > 0.45 ? (n - 0.45) * 4 : 0; // threshold for cloud formation
+        const alpha = Math.min(0.4, cloudPresence * 0.5);
+        cloudColors[i*4] = 1; cloudColors[i*4+1] = 1; cloudColors[i*4+2] = 1;
+        cloudColors[i*4+3] = alpha;
+      }
+      cloudGeo.setAttribute('color', new THREE.BufferAttribute(cloudColors, 4));
+      const cloudMesh = new THREE.Mesh(cloudGeo, new THREE.MeshBasicMaterial({
+        vertexColors: true, transparent: true, depthWrite: false, side: THREE.DoubleSide,
+      }));
+      cloudMesh.userData.isCloud = true;
+      group.add(cloudMesh);
+    }
   }
 }
 
@@ -1836,21 +1861,70 @@ function drawMinimap() {
 
 // -- Render loop --
 let lastCamAngle = 0;
-(function animate() {
+let frameCount = 0;
+(function animate(time) {
   requestAnimationFrame(animate);
   controls.update();
+  frameCount++;
 
-  // Auto-rotate the planet globe
+  // Auto-rotate the planet globe + cloud parallax
   if (planetGlobeGroup.visible && planetGlobeGroup.children.length > 0) {
     planetGlobeGroup.rotation.y += 0.002;
+    // Clouds rotate slightly faster for parallax
+    for (const child of planetGlobeGroup.children) {
+      if (child.userData?.isCloud) {
+        child.rotation.y += 0.0008; // relative to group
+      }
+    }
   }
 
-  // Refresh lane highlights when camera rotates (check every few frames)
+  // Animate planet orbits in system view
+  if (zoneGroup.visible && !planetGlobeGroup.visible && planetMeshes.length > 0) {
+    const t = (time || 0) * 0.0001;
+    for (const mesh of planetMeshes) {
+      const planet = mesh.userData.planet;
+      if (!planet) continue;
+      const orbitAU = planet.semi_major_axis / 1000;
+      const orbitR = orbitAU * ZONE_SCALE;
+      const period = Math.max(1, planet.orbital_period / 1000); // years
+      const speed = 1.0 / period; // faster for inner planets
+      const baseAngle = (planet.mean_anomaly / 100) * (Math.PI / 180);
+      const angle = baseAngle + t * speed * 2;
+
+      // Compute offset for primary star position in binary systems
+      let offsetX = 0;
+      if (currentSystemData) {
+        const starsData = currentSystemData.starsData;
+        const companion = starsData?.find(s => !s.is_primary);
+        if (companion) {
+          const primary = starsData.find(s => s.is_primary);
+          offsetX = -((primary?.semi_major_axis || 0) / 1000) * ZONE_SCALE;
+        }
+      }
+
+      mesh.position.x = offsetX + Math.cos(angle) * orbitR;
+      mesh.position.z = Math.sin(angle) * orbitR;
+    }
+  }
+
+  // Twinkle stars in galaxy view — subtle size oscillation
+  if (!zoneGroup.visible && frameCount % 3 === 0) {
+    const sizeAttr = pointsGeo.attributes.size;
+    const t2 = (time || 0) * 0.001;
+    for (let i = 0; i < count; i++) {
+      const base = 4 + Math.log10(Math.max(1, systems[i]._lum)) * 3;
+      const twinkle = Math.sin(t2 + i * 1.7) * 0.3 + Math.sin(t2 * 0.7 + i * 3.1) * 0.2;
+      sizeAttr.array[i] = base + twinkle;
+    }
+    sizeAttr.needsUpdate = true;
+  }
+
+  // Refresh lane highlights when camera rotates
   if (selectedIdx >= 0 && laneHighlightGroup.visible) {
     const fwd = new THREE.Vector3();
     camera.getWorldDirection(fwd);
     const angle = Math.atan2(fwd.x, fwd.z);
-    if (Math.abs(angle - lastCamAngle) > 0.1) { // >~6 degrees change
+    if (Math.abs(angle - lastCamAngle) > 0.1) {
       lastCamAngle = angle;
       showLaneHighlights(selectedIdx);
     }
