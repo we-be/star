@@ -56,6 +56,10 @@ canvas { display: block; }
 <div id="hud">Loading...</div>
 <div id="tooltip"></div>
 <div id="panel"></div>
+<div id="discoveries" style="position:absolute;top:16px;left:16px;margin-top:30px;width:280px;background:rgba(8,8,16,0.92);border:1px solid #333;border-radius:8px;padding:12px;display:none;font-size:12px;line-height:1.6;max-height:60vh;overflow-y:auto">
+  <div style="color:#888;margin-bottom:4px">DISCOVERY LOG <span style="float:right;cursor:pointer;color:#555" onclick="this.parentElement.parentElement.style.display='none'">&times;</span></div>
+  <div id="disc-content"></div>
+</div>
 <div id="legend">
   <span><i class="swatch" style="background:#f48042"></i>M</span>
   <span><i class="swatch" style="background:#ffb570"></i>K</span>
@@ -65,7 +69,7 @@ canvas { display: block; }
   <span><i class="swatch" style="background:#b0c0ff"></i>B</span>
   <span><i class="swatch" style="background:#8099ff"></i>O</span>
 </div>
-<div id="controls-hint">WASD hop stars | Tab cycle planets | Scroll zoom | Drag orbit | Click select | Esc back</div>
+<div id="controls-hint">WASD hop stars | Tab cycle planets | L discovery log | Scroll zoom | Click select | Esc back</div>
 
 <script type="importmap">
 { "imports": {
@@ -957,24 +961,56 @@ function updateHUD() {
 }
 
 const visitedSystems = new Set();
+const discoveryLog = []; // { type, name, detail, score }
 
 function trackDiscovery(planets, sysIdx) {
-  if (visitedSystems.has(sysIdx)) return; // don't double-count
+  if (visitedSystems.has(sysIdx)) return;
   visitedSystems.add(sysIdx);
   discovery.explored++;
-  for (const p of planets) {
-    if (p.id_parent) discovery.moons++;
-    else discovery.planets++;
+
+  const sys = systems[sysIdx];
+  const mainPlanets = planets.filter(p => !p.id_parent);
+  const moons = planets.filter(p => p.id_parent);
+
+  discovery.planets += mainPlanets.length;
+  discovery.moons += moons.length;
+
+  // Log notable discoveries
+  for (const p of mainPlanets) {
     const hab = p.cached_habitability || 0;
     if (hab > discovery.bestHab) {
       discovery.bestHab = hab;
       discovery.bestName = p.name;
     }
+    // Log habitable worlds
+    if (hab > 7000) {
+      discoveryLog.push({ type: 'habitable', name: p.name, detail: `${(hab/100).toFixed(0)}% hab in ${sys.name}`, score: hab });
+    }
+    // Log water worlds
+    if (p.water_state === 1 && p.surface_water_frac > 3000) {
+      discoveryLog.push({ type: 'ocean', name: p.name, detail: `${(p.surface_water_frac/100).toFixed(0)}% ocean in ${sys.name}`, score: p.surface_water_frac });
+    }
+    // Log gas giants
+    if (p.class_name === 'gas_giant') {
+      discoveryLog.push({ type: 'giant', name: p.name, detail: `${(p.total_mass/1000).toFixed(1)}M\u2295 in ${sys.name}`, score: p.total_mass });
+    }
   }
-  updateHUD();
 
-  // Mark system as visited in point cloud — brighten it with a white ring overlay
+  // Sort log by score descending
+  discoveryLog.sort((a, b) => b.score - a.score);
+
+  updateHUD();
+  updateDiscoveryPanel();
   markVisited(sysIdx);
+}
+
+function updateDiscoveryPanel() {
+  const el = document.getElementById('disc-content');
+  if (!el || discoveryLog.length === 0) return;
+  const icons = { habitable: '\ud83c\udf0d', ocean: '\ud83c\udf0a', giant: '\ud83e\ude90' };
+  el.innerHTML = discoveryLog.slice(0, 15).map(d =>
+    `<div style="margin:3px 0"><span style="margin-right:4px">${icons[d.type]||'\u2b50'}</span><b style="color:#ddd">${d.name}</b> <span style="color:#777">${d.detail}</span></div>`
+  ).join('');
 }
 
 function markVisited(idx) {
@@ -1214,11 +1250,12 @@ async function showPlanetPanel(planet) {
   const id = planet.id;
 
   // Fetch composition + atmosphere in parallel
-  const [comp, atm, regions, deposits] = await Promise.all([
+  const [comp, atm, regions, deposits, features] = await Promise.all([
     fetch(`${PLANET_API}/planets/${id}/composition`).then(r => r.json()).catch(() => []),
     fetch(`${PLANET_API}/planets/${id}/atmosphere`).then(r => r.json()).catch(() => []),
     fetch(`${PLANET_API}/planets/${id}/regions`).then(r => r.json()).catch(() => []),
     fetch(`${PLANET_API}/planets/${id}/deposits`).then(r => r.json()).catch(() => []),
+    fetch(`${PLANET_API}/planets/${id}/features`).then(r => r.json()).catch(() => []),
   ]);
 
   const col = rgbHex([planetColor(planet).r, planetColor(planet).g, planetColor(planet).b]);
@@ -1299,6 +1336,26 @@ async function showPlanetPanel(planet) {
       h += `</div>`;
     }
     if (regions.length > 8) h += `<div style="color:#555;font-size:11px">+${regions.length - 8} more</div>`;
+  }
+
+  // Features
+  if (features.length > 0) {
+    h += `<h3>Features (${features.length})</h3>`;
+    const featIcons = {
+      volcano: '\ud83c\udf0b', mountain_range: '\u26f0\ufe0f', crater: '\u2b55',
+      river_system: '\ud83c\udf0a', mineral_vein: '\ud83d\udc8e', geothermal_vent: '\u2668\ufe0f',
+      canyon: '\ud83c\udfdc\ufe0f', glacier: '\u2744\ufe0f', cave_system: '\ud83d\udd73\ufe0f',
+      rare_deposit: '\u2b50', fertile_basin: '\ud83c\udf3e', radiation_zone: '\u2622\ufe0f',
+    };
+    for (const f of features.slice(0, 10)) {
+      const icon = featIcons[f.type_name] || '\u25cf';
+      h += `<div style="display:flex;align-items:center;margin:2px 0;font-size:11px">`;
+      h += `<span style="margin-right:5px">${icon}</span>`;
+      h += `<span class="label" style="flex:1">${f.name}</span>`;
+      h += `<span class="val" style="color:#777">${f.type_name.replace('_',' ')}</span>`;
+      h += `</div>`;
+    }
+    if (features.length > 10) h += `<div style="color:#555;font-size:11px">+${features.length - 10} more</div>`;
   }
 
   // Deposits
@@ -1410,6 +1467,13 @@ addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
 
   if (k === 'escape') { flyOut(); return; }
+
+  // L: toggle discovery log
+  if (k === 'l') {
+    const disc = document.getElementById('discoveries');
+    disc.style.display = disc.style.display === 'none' ? 'block' : 'none';
+    return;
+  }
 
   // Tab: cycle through planets in current system
   if (e.key === 'Tab' && currentSystemData && currentSystemData.planets.length > 0) {
