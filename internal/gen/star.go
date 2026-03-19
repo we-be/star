@@ -80,7 +80,7 @@ func GenerateStar(rng *rand.Rand, cfg *StarConfig, x, y, z int32) StarResult {
 
 	return StarResult{
 		ID:                NextID(),
-		Name:              fmt.Sprintf("%s-%04d", sc.Name, rng.IntN(9000)+1000),
+		Name:              fmt.Sprintf("%s %s-%d", sc.Name, string([]byte{byte('A' + rng.IntN(26))}), rng.IntN(900)+100),
 		SpectralClassID:   sc.ID,
 		LuminosityClassID: lc.ID,
 		LifecycleStageID:  ls.ID,

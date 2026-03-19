@@ -941,10 +941,36 @@ function destroyPlanetGlobe() {
   }
 }
 
-// -- HUD --
+// -- HUD with exploration stats --
 const binaryCount = systems.filter(s => s._count > 1).length;
-document.getElementById('hud').textContent =
-  `${count} systems | ${starsRaw.length} stars | ${binaryCount} binary`;
+const discovery = { explored: 0, planets: 0, moons: 0, bestHab: 0, bestName: '' };
+
+function updateHUD() {
+  const base = `${count} systems | ${starsRaw.length} stars | ${binaryCount} binary`;
+  if (discovery.explored === 0) {
+    document.getElementById('hud').textContent = base;
+  } else {
+    const best = discovery.bestName ? ` | best: ${discovery.bestName} (${(discovery.bestHab/100).toFixed(0)}%)` : '';
+    document.getElementById('hud').textContent =
+      `${base} | explored ${discovery.explored} | ${discovery.planets} planets ${discovery.moons} moons${best}`;
+  }
+}
+
+function trackDiscovery(planets) {
+  discovery.explored++;
+  for (const p of planets) {
+    if (p.id_parent) discovery.moons++;
+    else discovery.planets++;
+    const hab = p.cached_habitability || 0;
+    if (hab > discovery.bestHab) {
+      discovery.bestHab = hab;
+      discovery.bestName = p.name;
+    }
+  }
+  updateHUD();
+}
+
+updateHUD();
 
 // -- Raycaster (adaptive threshold) --
 const raycaster = new THREE.Raycaster();
@@ -1046,6 +1072,7 @@ async function navigateToSystem(idx) {
   addPlanetsToZones(planets, primaryOffsetAU);
   flyTo(targetPos, zoomDist);
   showSystemPanel(sys, starsData, envData, planets);
+  trackDiscovery(planets);
   navigating = false;
 }
 
@@ -1222,9 +1249,11 @@ async function showPlanetPanel(planet) {
   // Atmosphere
   if (atm.length > 0) {
     h += `<h3>Atmosphere</h3>`;
+    const atmNames = { water_ice: 'water vapor', carbon_dioxide: 'CO\u2082', rare_earths: 'rare gases' };
     for (const a of atm) {
       const pct = (a.concentration / 100).toFixed(1);
-      h += `<div class="row"><span class="label">${a.material_name}</span><span class="val">`;
+      const displayName = atmNames[a.material_name] || a.material_name;
+      h += `<div class="row"><span class="label">${displayName}</span><span class="val">`;
       h += `<span style="display:inline-block;width:${Math.min(a.concentration/100,100)}px;height:6px;background:#557;border-radius:3px;margin-right:4px;vertical-align:middle"></span>`;
       h += `${pct}%</span></div>`;
     }

@@ -1,7 +1,6 @@
 package gen
 
 import (
-	"fmt"
 	"math"
 	"math/rand/v2"
 )
@@ -37,7 +36,7 @@ func GenerateSystem(rng *rand.Rand, cfg *StarConfig, x, y, z int32) SystemResult
 
 	sys := SystemResult{
 		ID:   NextID(),
-		Name: fmt.Sprintf("SYS-%s", primary.Name),
+		Name: SystemName(rng),
 		PosX: x, PosY: y, PosZ: z,
 		Stars: []SystemStarResult{{
 			Star:      primary,
