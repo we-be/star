@@ -73,7 +73,7 @@ canvas { display: block; }
   <span><i class="swatch" style="background:#b0c0ff"></i>B</span>
   <span><i class="swatch" style="background:#8099ff"></i>O</span>
 </div>
-<div id="controls-hint">WASD hop | Tab planets | R random jump | L log | Click select | Esc back</div>
+<div id="controls-hint">WASD hop | Tab planets | R random | L log | 1-7 filter OBAFGKM | 0 clear | Esc back</div>
 
 <script type="importmap">
 { "imports": {
@@ -1437,6 +1437,11 @@ async function navigateToSystem(idx) {
   showZones(targetPos, starsData);
   addPlanetsToZones(planets, primaryOffsetAU);
   showLaneHighlights(idx);
+
+  // Tint scene by star color
+  const [sr, sg, sb] = tempToRGB(primary?.temp || 5778);
+  renderer.setClearColor(new THREE.Color(sr * 0.02, sg * 0.02, sb * 0.02));
+
   flyTo(targetPos, zoomDist);
   showSystemPanel(sys, starsData, envData, planets);
   trackDiscovery(planets, idx);
@@ -1556,6 +1561,22 @@ window.clickPlanet = async function(id) {
   if (planet) await showPlanetPanel(planet);
 };
 
+// Earth-relative formatting: "2.5× \u2191" with color
+function earthRel(val, earthVal, unit, opts = {}) {
+  const ratio = val / earthVal;
+  const arrow = ratio > 1.1 ? '\u2191' : ratio < 0.9 ? '\u2193' : '\u2248';
+  const color = opts.invGood
+    ? (ratio > 1.5 ? '#c44' : ratio < 0.5 ? '#c44' : ratio > 0.9 && ratio < 1.1 ? '#4a4' : '#aa8')
+    : (arrow === '\u2248' ? '#4a4' : '#aa8');
+  return `${ratio.toFixed(2)}× ${unit} <span style="color:${color}">${arrow}</span>`;
+}
+
+function tempC(kelvin) {
+  const c = kelvin - 273;
+  const col = c >= 0 && c <= 40 ? '#4a4' : c > 40 && c < 100 ? '#aa8' : '#c44';
+  return `${kelvin}K <span style="color:${col}">(${c > 0 ? '+' : ''}${c}\u00b0C)</span>`;
+}
+
 async function showPlanetPanel(planet) {
   const p = document.getElementById('panel');
   const id = planet.id;
@@ -1587,16 +1608,16 @@ async function showPlanetPanel(planet) {
   h += `<div style="width:${hab/100}%;height:100%;background:${habCol};border-radius:4px"></div></div></div>`;
 
   h += `<h3>Physical</h3>`;
-  h += `<div class="row"><span class="label">Mass</span><span class="val">${fmt(planet.total_mass,'M\u2295',1000)}</span></div>`;
-  h += `<div class="row"><span class="label">Radius</span><span class="val">${fmt(planet.cached_radius,'R\u2295',1000)}</span></div>`;
-  h += `<div class="row"><span class="label">Gravity</span><span class="val">${fmt(planet.cached_gravity,'g',1000)}</span></div>`;
-  h += `<div class="row"><span class="label">Density</span><span class="val">${planet.cached_density} kg/m\u00b3</span></div>`;
+  h += `<div class="row"><span class="label">Mass</span><span class="val">${earthRel(planet.total_mass, 1000, 'Earth')}</span></div>`;
+  h += `<div class="row"><span class="label">Radius</span><span class="val">${earthRel(planet.cached_radius||1000, 1000, 'Earth')}</span></div>`;
+  h += `<div class="row"><span class="label">Gravity</span><span class="val">${earthRel(planet.cached_gravity||1000, 1000, 'g', {invGood:true})}</span></div>`;
+  h += `<div class="row"><span class="label">Density</span><span class="val">${earthRel(planet.cached_density||5500, 5500, 'Earth')}</span></div>`;
 
   h += `<h3>Surface</h3>`;
-  h += `<div class="row"><span class="label">Temperature</span><span class="val">${planet.cached_surface_temp} K</span></div>`;
-  h += `<div class="row"><span class="label">Pressure</span><span class="val">${fmt(planet.atm_pressure,'atm',1000)}</span></div>`;
+  h += `<div class="row"><span class="label">Temperature</span><span class="val">${tempC(planet.cached_surface_temp||0)}</span></div>`;
+  h += `<div class="row"><span class="label">Pressure</span><span class="val">${earthRel(planet.atm_pressure, 1013, 'atm', {invGood:true})}</span></div>`;
   h += `<div class="row"><span class="label">Water</span><span class="val">${ws} (${(planet.surface_water_frac/100).toFixed(0)}%)</span></div>`;
-  h += `<div class="row"><span class="label">Magnetic field</span><span class="val">${fmt(planet.magnetic_field,'',1000)} Earth</span></div>`;
+  h += `<div class="row"><span class="label">Mag. field</span><span class="val">${earthRel(planet.magnetic_field, 1000, 'Earth')}</span></div>`;
   h += `<div class="row"><span class="label">Tectonics</span><span class="val">${planet.tectonic_activity}</span></div>`;
   h += `<div class="row"><span class="label">Volcanism</span><span class="val">${planet.volcanism}</span></div>`;
 
@@ -1804,10 +1825,67 @@ function flyOut() {
   hideZones();
   hideLaneHighlights();
   selectedIdx = -1;
+  renderer.setClearColor(0x000000);
   flyTo(new THREE.Vector3(0, 0, 0), 14000);
   document.getElementById('panel').style.display = 'none';
 }
 window.flyOut = flyOut;
+
+// -- Spectral type filter --
+let activeFilter = null;
+
+function toggleSpectralFilter(letter) {
+  if (activeFilter === letter) {
+    clearSpectralFilter();
+    return;
+  }
+  activeFilter = letter;
+  const colorAttr = pointsGeo.attributes.color;
+  const sizeAttr = pointsGeo.attributes.size;
+  for (let i = 0; i < count; i++) {
+    const sysName = systems[i].name || '';
+    // Check if this system's primary star matches the spectral type
+    // We stored the primary temp — infer type from temperature range
+    const temp = systems[i]._temp;
+    const type = tempToSpectral(temp);
+    const match = type === letter;
+    if (match) {
+      const [r, g, b] = tempToRGB(temp);
+      colorAttr.array[i*3] = r; colorAttr.array[i*3+1] = g; colorAttr.array[i*3+2] = b;
+      sizeAttr.array[i] = (4 + Math.log10(Math.max(1, systems[i]._lum)) * 3) * 1.5;
+    } else {
+      colorAttr.array[i*3] = 0.08; colorAttr.array[i*3+1] = 0.08; colorAttr.array[i*3+2] = 0.1;
+      sizeAttr.array[i] = 2;
+    }
+  }
+  colorAttr.needsUpdate = true;
+  sizeAttr.needsUpdate = true;
+  document.getElementById('hud').textContent = `Showing ${letter}-type stars (press 0 to clear)`;
+}
+
+function clearSpectralFilter() {
+  activeFilter = null;
+  const colorAttr = pointsGeo.attributes.color;
+  const sizeAttr = pointsGeo.attributes.size;
+  for (let i = 0; i < count; i++) {
+    const [r, g, b] = tempToRGB(systems[i]._temp);
+    colorAttr.array[i*3] = r; colorAttr.array[i*3+1] = g; colorAttr.array[i*3+2] = b;
+    sizeAttr.array[i] = 4 + Math.log10(Math.max(1, systems[i]._lum)) * 3;
+  }
+  colorAttr.needsUpdate = true;
+  sizeAttr.needsUpdate = true;
+  updateHUD();
+}
+
+function tempToSpectral(temp) {
+  if (temp > 30000) return 'O';
+  if (temp > 10000) return 'B';
+  if (temp > 7500) return 'A';
+  if (temp > 6000) return 'F';
+  if (temp > 5200) return 'G';
+  if (temp > 3700) return 'K';
+  return 'M';
+}
 
 // -- WASD star navigation --
 const wasdCooldown = {};
@@ -1820,6 +1898,20 @@ addEventListener('keydown', e => {
   if (k === 'l') {
     const disc = document.getElementById('discoveries');
     disc.style.display = disc.style.display === 'none' ? 'block' : 'none';
+    return;
+  }
+
+  // Number keys 1-7: filter galaxy by spectral type
+  if (k >= '1' && k <= '7' && selectedIdx < 0) {
+    const typeMap = { '1': 'O', '2': 'B', '3': 'A', '4': 'F', '5': 'G', '6': 'K', '7': 'M' };
+    const letter = typeMap[k];
+    toggleSpectralFilter(letter);
+    return;
+  }
+
+  // 0: clear spectral filter
+  if (k === '0' && selectedIdx < 0) {
+    clearSpectralFilter();
     return;
   }
 
