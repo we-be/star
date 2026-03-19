@@ -78,6 +78,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 const API = window.location.origin;
+const PLANET_API = 'http://localhost:8082';
 
 // -- Stellar color --
 const COLOR_TABLE = [
@@ -377,7 +378,514 @@ function showZones(center, starsData) {
   zoneGroup.visible = true;
 }
 
-function hideZones() { zoneGroup.visible = false; }
+function hideZones() {
+  zoneGroup.visible = false;
+  planetMeshes.length = 0;
+}
+
+// ============================================================
+// PLANET VISUALIZATION
+// ============================================================
+const planetMeshes = []; // for raycasting clicks
+
+const WATER_STATES = { 0: 'none', 1: 'liquid', 2: 'ice', 3: 'vapor' };
+
+function planetColor(p) {
+  const cls = p.class_name;
+  if (cls === 'gas_giant')  return new THREE.Color(0.85, 0.65, 0.35);
+  if (cls === 'ice_giant')  return new THREE.Color(0.45, 0.7, 0.85);
+  const hab = p.cached_habitability || 0;
+  const ws = p.water_state;
+  if (ws === 1 && hab > 7000) return new THREE.Color(0.25, 0.65, 0.4);  // habitable green-blue
+  if (ws === 1)               return new THREE.Color(0.3, 0.5, 0.7);    // wet blue
+  if (ws === 2)               return new THREE.Color(0.75, 0.82, 0.9);  // icy white
+  if (ws === 3)               return new THREE.Color(0.8, 0.5, 0.3);    // hot vapor
+  const t = p.cached_surface_temp || 300;
+  if (t > 500) return new THREE.Color(0.75, 0.4, 0.25);  // scorched
+  if (t < 150) return new THREE.Color(0.55, 0.55, 0.6);  // frozen rock
+  return new THREE.Color(0.6, 0.5, 0.4);                  // barren
+}
+
+function planetVisualRadius(p) {
+  const r = (p.cached_radius || 1000) / 1000; // earth radii
+  const cls = p.class_name;
+  if (cls === 'gas_giant')  return Math.max(6, Math.sqrt(r) * 2.5);
+  if (cls === 'ice_giant')  return Math.max(4, Math.sqrt(r) * 2);
+  return Math.max(1.5, Math.pow(r, 0.6) * 2);
+}
+
+function makePlanetMesh(planet) {
+  const r = planetVisualRadius(planet);
+  const col = planetColor(planet);
+  const group = new THREE.Group();
+
+  group.add(new THREE.Mesh(
+    new THREE.SphereGeometry(r, 24, 24),
+    new THREE.MeshBasicMaterial({ color: col })
+  ));
+
+  // Subtle glow
+  group.add(new THREE.Mesh(
+    new THREE.SphereGeometry(r * 2, 16, 16),
+    new THREE.MeshBasicMaterial({
+      color: col, transparent: true, opacity: 0.08,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    })
+  ));
+
+  // Ring for gas giants
+  if (planet.class_name === 'gas_giant' && (planet.id % 3 === 0)) {
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(r * 1.4, r * 2.0, 48),
+      new THREE.MeshBasicMaterial({ color: 0x998866, side: THREE.DoubleSide, transparent: true, opacity: 0.3, depthWrite: false })
+    );
+    ring.rotation.x = Math.PI * 0.4;
+    group.add(ring);
+  }
+
+  group.userData.planet = planet;
+  return group;
+}
+
+function addPlanetsToZones(planets, primaryOffsetAU) {
+  planetMeshes.length = 0;
+
+  // Index moons by parent ID
+  const moonsByParent = {};
+  for (const p of planets) {
+    if (p.id_parent) {
+      (moonsByParent[p.id_parent] ||= []).push(p);
+    }
+  }
+
+  for (const planet of planets) {
+    if (planet.id_parent) continue; // moons rendered with their parent
+
+    const orbitAU = planet.semi_major_axis / 1000;
+    const orbitR = orbitAU * ZONE_SCALE;
+
+    // Orbit track
+    zoneGroup.add(makeCircle(orbitR, 0x444444, 0.2).translateX(primaryOffsetAU * ZONE_SCALE));
+
+    // Place planet at its mean anomaly angle
+    const angle = (planet.mean_anomaly / 100) * (Math.PI / 180);
+    const px = primaryOffsetAU * ZONE_SCALE + Math.cos(angle) * orbitR;
+    const pz = Math.sin(angle) * orbitR;
+
+    const mesh = makePlanetMesh(planet);
+    mesh.position.set(px, 0, pz);
+    zoneGroup.add(mesh);
+    planetMeshes.push(mesh);
+
+    // Planet label
+    const habScore = planet.cached_habitability || 0;
+    const labelColor = habScore > 7000 ? '#44bb66' : habScore > 4000 ? '#888888' : '#555555';
+    zoneGroup.add(makeLabel(
+      planet.name,
+      px, pz + planetVisualRadius(planet) + 10, labelColor
+    ));
+
+    // Render moons as small dots around the planet
+    const moons = moonsByParent[planet.id] || [];
+    if (moons.length > 0) {
+      const pRadius = planetVisualRadius(planet);
+      for (let mi = 0; mi < moons.length; mi++) {
+        const moon = moons[mi];
+        // Space moons evenly around the planet
+        const moonAngle = (mi / moons.length) * Math.PI * 2;
+        const moonDist = pRadius * 2.5 + mi * 3; // spread outward
+        const mx = px + Math.cos(moonAngle) * moonDist;
+        const mz = pz + Math.sin(moonAngle) * moonDist;
+
+        // Moon orbit ring (thin, dim)
+        const moonOrbit = makeCircle(moonDist, 0x333344, 0.15);
+        moonOrbit.position.set(px, 0, pz);
+        zoneGroup.add(moonOrbit);
+
+        // Moon sphere (tiny)
+        const moonMesh = makePlanetMesh(moon);
+        moonMesh.position.set(mx, 0, mz);
+        // Scale down moon meshes
+        moonMesh.scale.setScalar(0.5);
+        zoneGroup.add(moonMesh);
+        planetMeshes.push(moonMesh);
+
+        // Moon label (small, dim)
+        zoneGroup.add(makeLabel(moon.name, mx, mz + 6, '#555555'));
+      }
+    }
+  }
+}
+
+// ============================================================
+// PLANET GLOBE RENDERER
+// ============================================================
+const planetGlobeGroup = new THREE.Group();
+planetGlobeGroup.visible = false;
+scene.add(planetGlobeGroup);
+
+const BIOME_COLORS = {
+  ocean:     0x1a4a7a, sea:       0x2a5a8a, forest:    0x2d5a27,
+  grassland: 0x5a7a3a, desert:    0xc4a44a, tundra:    0x8a9a9a,
+  ice_cap:   0xd4dde6, volcanic:  0x5a2a1a, barren:    0x6a6058,
+  toxic:     0x4a5a2a, temperate: 0x4a8a4a, tropical:  0x2a7a3a,
+  swamp:     0x3a5a3a, continent: 0x7a7060, plateau:   0x8a7a6a,
+  island:    0x6a8a5a,
+};
+
+// Simple value-noise from 3D position for biome boundary variation
+function valueNoise3D(x, y, z) {
+  const n = Math.sin(x * 12.9898 + y * 78.233 + z * 45.164) * 43758.5453;
+  return n - Math.floor(n);
+}
+
+function fbmNoise(x, y, z, octaves) {
+  let v = 0, amp = 0.5, freq = 1;
+  for (let i = 0; i < octaves; i++) {
+    v += valueNoise3D(x * freq, y * freq, z * freq) * amp;
+    amp *= 0.5; freq *= 2.1;
+  }
+  return v;
+}
+
+// Create an icosphere by subdividing an icosahedron
+function createIcosphere(radius, subdivisions) {
+  const t = (1 + Math.sqrt(5)) / 2;
+  let verts = [
+    [-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0],
+    [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t],
+    [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1],
+  ];
+  let faces = [
+    [0,11,5],[0,5,1],[0,1,7],[0,7,10],[0,10,11],
+    [1,5,9],[5,11,4],[11,10,2],[10,7,6],[7,1,8],
+    [3,9,4],[3,4,2],[3,2,6],[3,6,8],[3,8,9],
+    [4,9,5],[2,4,11],[6,2,10],[8,6,7],[9,8,1],
+  ];
+
+  // Normalize initial vertices to unit sphere
+  verts = verts.map(v => {
+    const l = Math.sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);
+    return [v[0]/l, v[1]/l, v[2]/l];
+  });
+
+  const midPointCache = {};
+  function getMidpoint(i1, i2) {
+    const key = Math.min(i1,i2) + '_' + Math.max(i1,i2);
+    if (midPointCache[key] !== undefined) return midPointCache[key];
+    const v1 = verts[i1], v2 = verts[i2];
+    const mid = [(v1[0]+v2[0])/2, (v1[1]+v2[1])/2, (v1[2]+v2[2])/2];
+    const l = Math.sqrt(mid[0]*mid[0]+mid[1]*mid[1]+mid[2]*mid[2]);
+    mid[0]/=l; mid[1]/=l; mid[2]/=l;
+    verts.push(mid);
+    midPointCache[key] = verts.length - 1;
+    return verts.length - 1;
+  }
+
+  for (let s = 0; s < subdivisions; s++) {
+    const newFaces = [];
+    for (const [a, b, c] of faces) {
+      const ab = getMidpoint(a, b);
+      const bc = getMidpoint(b, c);
+      const ca = getMidpoint(c, a);
+      newFaces.push([a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]);
+    }
+    faces = newFaces;
+    // Clear cache between subdivision levels to avoid stale keys
+  }
+
+  // Scale to radius
+  const positions = new Float32Array(faces.length * 9);
+  const normals = new Float32Array(faces.length * 9);
+  const faceCenters = []; // {x,y,z,lat} per face
+  for (let f = 0; f < faces.length; f++) {
+    const [a, b, c] = faces[f];
+    let cx = 0, cy = 0, cz = 0;
+    for (let vi = 0; vi < 3; vi++) {
+      const v = verts[faces[f][vi]];
+      positions[f*9+vi*3]   = v[0] * radius;
+      positions[f*9+vi*3+1] = v[1] * radius;
+      positions[f*9+vi*3+2] = v[2] * radius;
+      normals[f*9+vi*3]   = v[0];
+      normals[f*9+vi*3+1] = v[1];
+      normals[f*9+vi*3+2] = v[2];
+      cx += v[0]; cy += v[1]; cz += v[2];
+    }
+    cx /= 3; cy /= 3; cz /= 3;
+    const lat = Math.asin(cy / Math.sqrt(cx*cx+cy*cy+cz*cz)); // -PI/2 to PI/2
+    faceCenters.push({ x: cx, y: cy, z: cz, lat });
+  }
+
+  return { positions, normals, faceCenters, faceCount: faces.length };
+}
+
+// Assign faces to regions and color them
+function buildGlobeGeometry(globeRadius, regions) {
+  const { positions, normals, faceCenters, faceCount } = createIcosphere(globeRadius, 4);
+  const colors = new Float32Array(faceCount * 9);
+
+  // Sort regions: oceans first, then by area_fraction descending
+  const sortedRegions = [...regions].sort((a, b) => {
+    const aOcean = (a.type_name === 'ocean' || a.biome_name === 'ocean' || a.biome_name === 'sea') ? 0 : 1;
+    const bOcean = (b.type_name === 'ocean' || b.biome_name === 'ocean' || b.biome_name === 'sea') ? 0 : 1;
+    if (aOcean !== bOcean) return aOcean - bOcean;
+    return (b.area_fraction || 0) - (a.area_fraction || 0);
+  });
+
+  // Latitude band mapping: integer bands (0=equatorial, 1=temperate, 2=subpolar, 3=polar, 4=extreme polar)
+  // Maps to latitude degree ranges. Regions have symmetric north/south placement.
+  const LAT_BANDS_INT = {
+    0: [-20, 20],   // equatorial
+    1: [-45, -15, 15, 45],  // temperate (two bands)
+    2: [-65, -40, 40, 65],  // subpolar
+    3: [-90, -60, 60, 90],  // polar
+    4: [-90, -75, 75, 90],  // extreme polar
+  };
+
+  function getLatRange(band) {
+    const b = LAT_BANDS_INT[band] || LAT_BANDS_INT[0];
+    if (b.length === 2) return b; // equatorial: single band
+    // For north/south bands, randomly pick hemisphere per region (handled by noise)
+    return [b[0], b[3]]; // full span, noise will cluster faces
+  }
+
+  // Build region assignment: for each face, pick the best matching region
+  // Each region owns a fraction of total area. We assign faces greedily.
+  const regionAssign = new Array(faceCount).fill(-1);
+  const regionBudget = sortedRegions.map(r => Math.max(1, Math.round((r.area_fraction / 10000) * faceCount)));
+
+  // First pass: assign each face to the best matching region
+  const faceScores = [];
+  for (let f = 0; f < faceCount; f++) {
+    const fc = faceCenters[f];
+    const latDeg = (fc.lat / Math.PI) * 180;
+    const noise = fbmNoise(fc.x * 3, fc.y * 3, fc.z * 3, 4) * 20 - 10; // +/- 10 degrees jitter
+    const noisedLat = latDeg + noise;
+
+    let bestRegion = -1, bestScore = -Infinity;
+    for (let r = 0; r < sortedRegions.length; r++) {
+      const reg = sortedRegions[r];
+      const band = getLatRange(reg.latitude_band);
+      const mid = (band[0] + band[1]) / 2;
+      const halfSpan = (band[1] - band[0]) / 2;
+
+      // How well does face latitude match the region's band?
+      let latScore;
+      if (noisedLat >= band[0] && noisedLat <= band[1]) {
+        latScore = 1.0 - Math.abs(noisedLat - mid) / (halfSpan + 1);
+      } else {
+        const dist = Math.min(Math.abs(noisedLat - band[0]), Math.abs(noisedLat - band[1]));
+        latScore = -dist * 0.05;
+      }
+
+      // Add noise based on face position for organic shapes
+      const posNoise = fbmNoise(fc.x * 5 + r * 1.3, fc.y * 5 + r * 2.7, fc.z * 5 + r * 0.9, 3);
+      const score = latScore + posNoise * 0.5 + (reg.area_fraction / 10000) * 0.3;
+
+      if (score > bestScore) { bestScore = score; bestRegion = r; }
+    }
+    faceScores.push({ face: f, region: bestRegion, score: bestScore });
+  }
+
+  // Assign: respect budgets roughly
+  const regionCounts = new Array(sortedRegions.length).fill(0);
+  // Sort faces by score descending for their assigned region — give priority to strong matches
+  faceScores.sort((a, b) => b.score - a.score);
+
+  for (const fs of faceScores) {
+    let r = fs.region;
+    if (r >= 0 && regionCounts[r] < regionBudget[r] * 1.5) {
+      regionAssign[fs.face] = r;
+      regionCounts[r]++;
+    } else {
+      // Find an under-filled region that fits latitude
+      const fc = faceCenters[fs.face];
+      const latDeg = (fc.lat / Math.PI) * 180;
+      let bestR = 0;
+      for (let ri = 0; ri < sortedRegions.length; ri++) {
+        if (regionCounts[ri] < regionBudget[ri]) { bestR = ri; break; }
+      }
+      regionAssign[fs.face] = bestR;
+      regionCounts[bestR]++;
+    }
+  }
+
+  // Color each face based on its region's biome
+  for (let f = 0; f < faceCount; f++) {
+    const rIdx = regionAssign[f];
+    const reg = sortedRegions[rIdx] || sortedRegions[0];
+    const biomeName = reg.biome_name || reg.type_name || 'continent';
+    const hexColor = BIOME_COLORS[biomeName] || BIOME_COLORS.continent;
+    const col = new THREE.Color(hexColor);
+
+    // Add subtle per-face color variation for visual interest
+    const fc = faceCenters[f];
+    const variation = (fbmNoise(fc.x * 8, fc.y * 8, fc.z * 8, 2) - 0.5) * 0.12;
+    col.r = Math.max(0, Math.min(1, col.r + variation));
+    col.g = Math.max(0, Math.min(1, col.g + variation * 0.8));
+    col.b = Math.max(0, Math.min(1, col.b + variation * 0.6));
+
+    for (let v = 0; v < 3; v++) {
+      colors[f*9+v*3]   = col.r;
+      colors[f*9+v*3+1] = col.g;
+      colors[f*9+v*3+2] = col.b;
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  return geo;
+}
+
+// Create feature markers on globe surface
+function addFeatureMarkers(group, features, globeRadius) {
+  for (const feat of features) {
+    // Deterministic position on sphere from feature name hash
+    let hash = 0;
+    const name = feat.type_name + (feat.id || '') + (feat.scale || '');
+    for (let i = 0; i < name.length; i++) hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
+    const phi = Math.acos(2 * ((hash & 0xffff) / 0xffff) - 1);
+    const theta = ((hash >> 16 & 0xffff) / 0xffff) * Math.PI * 2;
+    const px = globeRadius * Math.sin(phi) * Math.cos(theta);
+    const py = globeRadius * Math.cos(phi);
+    const pz = globeRadius * Math.sin(phi) * Math.sin(theta);
+
+    const markerSize = 1.5 + (feat.scale || 50) / 80;
+    let marker;
+
+    switch (feat.type_name) {
+      case 'volcano': {
+        const geo = new THREE.ConeGeometry(markerSize * 0.6, markerSize * 1.5, 6);
+        marker = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xcc3322 }));
+        break;
+      }
+      case 'mountain_range': {
+        const geo = new THREE.ConeGeometry(markerSize * 0.8, markerSize * 1.8, 4);
+        marker = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x888888 }));
+        break;
+      }
+      case 'mineral_vein':
+      case 'rare_deposit': {
+        const geo = new THREE.OctahedronGeometry(markerSize * 0.5);
+        marker = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xddcc22 }));
+        break;
+      }
+      case 'geothermal_vent': {
+        const geo = new THREE.SphereGeometry(markerSize * 0.5, 8, 8);
+        marker = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xee8833 }));
+        break;
+      }
+      default: {
+        const geo = new THREE.SphereGeometry(markerSize * 0.3, 6, 6);
+        marker = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xffffff }));
+      }
+    }
+
+    // Position on surface and orient outward
+    marker.position.set(px, py, pz);
+    marker.lookAt(0, 0, 0);
+    marker.rotateX(Math.PI / 2); // point cone/marker outward
+    // Push slightly above surface
+    const outward = new THREE.Vector3(px, py, pz).normalize().multiplyScalar(markerSize * 0.5);
+    marker.position.add(outward);
+
+    group.add(marker);
+  }
+}
+
+// Create atmosphere shell
+function addAtmosphere(group, globeRadius, planet) {
+  const ws = planet.water_state;
+  const atCol = ws === 1 ? 0x4488cc : ws === 3 ? 0xcc8844 : 0x6688aa;
+  const atOpacity = Math.min(0.15, (planet.atm_pressure || 0) / 20000);
+  if (atOpacity > 0.01) {
+    group.add(new THREE.Mesh(
+      new THREE.SphereGeometry(globeRadius * 1.04, 48, 48),
+      new THREE.MeshBasicMaterial({
+        color: atCol, transparent: true, opacity: atOpacity,
+        side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
+      })
+    ));
+  }
+}
+
+let globePlanetMesh = null; // the original small planet mesh, hidden while globe is shown
+
+async function createPlanetGlobe(planet) {
+  // Clear any existing globe
+  while (planetGlobeGroup.children.length) planetGlobeGroup.remove(planetGlobeGroup.children[0]);
+
+  const globeRadius = 50;
+
+  // Find the planet's mesh in zoneGroup to get world position
+  let worldPos = new THREE.Vector3();
+  globePlanetMesh = null;
+  for (const mesh of planetMeshes) {
+    if (mesh.userData.planet && mesh.userData.planet.id === planet.id) {
+      mesh.getWorldPosition(worldPos);
+      globePlanetMesh = mesh;
+      mesh.visible = false; // hide original small sphere
+      break;
+    }
+  }
+
+  planetGlobeGroup.position.copy(worldPos);
+
+  // Fetch regions and features
+  const [regions, features] = await Promise.all([
+    fetch(`${PLANET_API}/planets/${planet.id}/regions`).then(r => r.json()).catch(() => []),
+    fetch(`${PLANET_API}/planets/${planet.id}/features`).then(r => r.json()).catch(() => []),
+  ]);
+
+  // Build globe mesh
+  if (regions.length > 0) {
+    const globeGeo = buildGlobeGeometry(globeRadius, regions);
+    const globeMat = new THREE.MeshBasicMaterial({ vertexColors: true });
+    const globeMesh = new THREE.Mesh(globeGeo, globeMat);
+    planetGlobeGroup.add(globeMesh);
+  } else {
+    // Fallback: solid colored sphere if no regions
+    const col = planetColor(planet);
+    planetGlobeGroup.add(new THREE.Mesh(
+      new THREE.SphereGeometry(globeRadius, 48, 48),
+      new THREE.MeshBasicMaterial({ color: col })
+    ));
+  }
+
+  // Add atmosphere
+  addAtmosphere(planetGlobeGroup, globeRadius, planet);
+
+  // Add feature markers
+  if (features.length > 0) {
+    addFeatureMarkers(planetGlobeGroup, features, globeRadius);
+  }
+
+  planetGlobeGroup.visible = true;
+
+  // Fly camera to the globe
+  const camDist = globeRadius * 3;
+  flyTo(worldPos, camDist);
+}
+
+function destroyPlanetGlobe() {
+  planetGlobeGroup.visible = false;
+  while (planetGlobeGroup.children.length) {
+    const child = planetGlobeGroup.children[0];
+    if (child.geometry) child.geometry.dispose();
+    if (child.material) {
+      if (child.material.map) child.material.map.dispose();
+      child.material.dispose();
+    }
+    planetGlobeGroup.remove(child);
+  }
+  // Restore original planet mesh visibility
+  if (globePlanetMesh) {
+    globePlanetMesh.visible = true;
+    globePlanetMesh = null;
+  }
+}
 
 // -- HUD --
 const binaryCount = systems.filter(s => s._count > 1).length;
@@ -400,6 +908,28 @@ function getHovered(e) {
 
 const tooltip = document.getElementById('tooltip');
 renderer.domElement.addEventListener('pointermove', e => {
+  mouse.x = (e.clientX / innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+
+  // Check planets first
+  if (planetMeshes.length > 0) {
+    const pHits = raycaster.intersectObjects(planetMeshes.map(m => m.children[0]));
+    if (pHits.length > 0) {
+      const pl = pHits[0].object.parent.userData.planet;
+      if (pl) {
+        tooltip.style.display = 'block';
+        tooltip.style.left = (e.clientX + 14) + 'px';
+        tooltip.style.top = (e.clientY + 14) + 'px';
+        const hab = pl.cached_habitability || 0;
+        tooltip.innerHTML = `<b>${pl.name}</b> (${pl.class_name})<br>${pl.cached_surface_temp||'?'}K | hab ${(hab/100).toFixed(0)}%`;
+        renderer.domElement.style.cursor = 'pointer';
+        return;
+      }
+    }
+  }
+
+  // Then check star systems
   const idx = getHovered(e);
   if (idx >= 0) {
     const s = systems[idx];
@@ -418,28 +948,50 @@ renderer.domElement.addEventListener('pointermove', e => {
 let selectedIdx = -1;
 let navigating = false;
 
+let currentSystemData = null; // stash for back-navigation from planet view
+
 async function navigateToSystem(idx) {
   if (navigating || idx < 0 || idx >= systems.length) return;
   navigating = true;
   selectedIdx = idx;
+  destroyPlanetGlobe();
   const sys = systems[idx];
   const targetPos = sysWorldPos(sys);
 
-  const [starsData, envData] = await Promise.all([
+  const [starsData, envData, planetsData] = await Promise.all([
     fetch(`${API}/systems/${sys.id}/stars`).then(r => r.json()),
     fetch(`${API}/systems/${sys.id}/environment`).then(r => r.json()).catch(() => null),
+    fetch(`${PLANET_API}/systems/${sys.id}/planets`).then(r => r.json()).catch(() => []),
   ]);
+
+  // Auto-generate planets if none exist
+  let planets = planetsData;
+  if (!planets || planets.length === 0) {
+    await fetch(`${PLANET_API}/generate/system/${sys.id}`, { method: 'POST' }).catch(() => null);
+    planets = await fetch(`${PLANET_API}/systems/${sys.id}/planets`).then(r => r.json()).catch(() => []);
+  }
+
+  currentSystemData = { sys, starsData, envData, planets };
 
   const primary = starsData.find(s => s.is_primary) || starsData[0];
   let maxAU = (primary?.frost_line || 3000) / 1000;
   for (const s of starsData) {
-    if (s.semi_major_axis) maxAU = Math.max(maxAU, (s.semi_major_axis) / 1000);
+    if (s.semi_major_axis) maxAU = Math.max(maxAU, s.semi_major_axis / 1000);
+  }
+  // Include outermost planet orbit
+  for (const p of planets) {
+    if (!p.id_parent) maxAU = Math.max(maxAU, p.semi_major_axis / 1000);
   }
   const zoomDist = Math.max(200, maxAU * ZONE_SCALE * 2.5);
 
+  // Determine primary star offset for binary systems
+  const companion = starsData.find(s => !s.is_primary);
+  const primaryOffsetAU = companion ? -(primary?.semi_major_axis || 0) / 1000 : 0;
+
   showZones(targetPos, starsData);
+  addPlanetsToZones(planets, primaryOffsetAU);
   flyTo(targetPos, zoomDist);
-  showPanel(sys, starsData, envData);
+  showSystemPanel(sys, starsData, envData, planets);
   navigating = false;
 }
 
@@ -486,22 +1038,41 @@ function findNeighbor(fromIdx, direction) {
   return bestIdx;
 }
 
-renderer.domElement.addEventListener('click', e => {
+renderer.domElement.addEventListener('click', async e => {
+  // First check if we clicked a planet mesh
+  mouse.x = (e.clientX / innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+
+  if (planetMeshes.length > 0) {
+    const planetHits = raycaster.intersectObjects(planetMeshes.map(m => m.children[0]));
+    if (planetHits.length > 0) {
+      const planet = planetHits[0].object.parent.userData.planet;
+      if (planet) {
+        await showPlanetPanel(planet);
+        return;
+      }
+    }
+  }
+
+  // Otherwise, check star point cloud
   const idx = getHovered(e);
   if (idx >= 0) navigateToSystem(idx);
 });
 
-// -- Info panel --
-function showPanel(sys, stars, env) {
-  const p = document.getElementById('panel');
-  const fmt = (v, u, d=1) => `${(v/d).toFixed(d>1?3:0)} ${u}`;
+// -- Info panels --
+const fmt = (v, u, d=1) => `${(v/d).toFixed(d>1?3:0)} ${u}`;
+const btn = (label, onclick) => `<button onclick="${onclick}" style="background:#1a1a2e;color:#6688aa;border:1px solid #333;padding:4px 10px;border-radius:4px;cursor:pointer;font-family:inherit;font-size:12px">${label}</button>`;
 
+function showSystemPanel(sys, stars, env, planets) {
+  const p = document.getElementById('panel');
   let h = `<span class="close" onclick="flyOut()">&times;</span>`;
-  h += `<div style="margin-bottom:8px"><button onclick="flyOut()" style="background:#1a1a2e;color:#6688aa;border:1px solid #333;padding:4px 10px;border-radius:4px;cursor:pointer;font-family:inherit;font-size:12px">&#8592; Galaxy</button></div>`;
+  h += `<div style="margin-bottom:8px">${btn('&#8592; Galaxy', 'flyOut()')}</div>`;
   h += `<h2>${sys.name}</h2>`;
   h += `<div class="row"><span class="label">Position</span><span class="val">(${sys.pos_x}, ${sys.pos_y}, ${sys.pos_z})</span></div>`;
   h += `<div class="row"><span class="label">Distance</span><span class="val">${sys.dist} units</span></div>`;
   h += `<div class="row"><span class="label">Stars</span><span class="val">${stars.length}${stars.length > 1 ? ' (binary)' : ''}</span></div>`;
+  h += `<div class="row"><span class="label">Planets</span><span class="val">${planets.length}</span></div>`;
 
   if (env) {
     h += `<h3>Stellar Environment</h3>`;
@@ -509,29 +1080,149 @@ function showPanel(sys, stars, env) {
     h += `<div class="row"><span class="label">Metallicity</span><span class="val">${fmt(env.metallicity,'dex',1000)}</span></div>`;
   }
 
-  for (const star of stars) {
-    const hex = rgbHex(tempToRGB(star.temp));
-    h += `<div class="star-block" style="border-left: 3px solid ${hex}">`;
-    h += `<b>${star.star_name}</b> <span style="color:${hex}">${star.spectral_name} ${star.luminosity_numeral}</span>`;
-    h += star.is_primary ? ' <span style="color:#555">(primary)</span>' : ' <span style="color:#555">(companion)</span>';
-    h += `<div class="row"><span class="label">Mass</span><span class="val">${fmt(star.mass,'M\u2609',1000)}</span></div>`;
-    h += `<div class="row"><span class="label">Radius</span><span class="val">${fmt(star.radius,'R\u2609',1000)}</span></div>`;
-    h += `<div class="row"><span class="label">Temp</span><span class="val">${star.temp} K</span></div>`;
-    h += `<div class="row"><span class="label">Luminosity</span><span class="val">${fmt(star.luminosity,'L\u2609',1000)}</span></div>`;
-    h += `<div class="row"><span class="label">Flares</span><span class="val">${star.flare_frequency}/yr</span></div>`;
-    h += `<div class="row"><span class="label">Solar wind</span><span class="val">${star.solar_wind}%</span></div>`;
-    if (!star.is_primary && star.semi_major_axis > 0) {
-      h += `<h3>Binary Orbit</h3>`;
-      h += `<div class="row"><span class="label">Separation</span><span class="val">${fmt(star.semi_major_axis,'AU',1000)}</span></div>`;
-      h += `<div class="row"><span class="label">Eccentricity</span><span class="val">${(star.eccentricity/10000).toFixed(3)}</span></div>`;
-      h += `<div class="row"><span class="label">Period</span><span class="val">${fmt(star.orbital_period,'yr',1000)}</span></div>`;
+  // Planet list — clickable
+  if (planets.length > 0) {
+    h += `<h3>Planets</h3>`;
+    for (const planet of planets) {
+      if (planet.id_parent) continue; // skip moons in main list
+      const col = rgbHex([planetColor(planet).r, planetColor(planet).g, planetColor(planet).b]);
+      const hab = planet.cached_habitability || 0;
+      const habBar = `<span style="display:inline-block;width:${hab/100}px;height:6px;background:${hab>7000?'#44bb66':hab>4000?'#888':'#444'};border-radius:3px;vertical-align:middle;margin-left:4px"></span>`;
+      const moons = planets.filter(m => m.id_parent === planet.id);
+      const moonTag = moons.length > 0 ? ` <span style="color:#556">${moons.length} moon${moons.length>1?'s':''}</span>` : '';
+      const ws = {0:'',1:' \ud83d\udca7',2:' \u2744\ufe0f',3:''}[planet.water_state] || '';
+      h += `<div class="star-block" style="border-left:3px solid ${col};cursor:pointer" onclick="clickPlanet(${planet.id})">`;
+      h += `<b>${planet.name}</b> <span style="color:#888">${planet.class_name}</span>${moonTag}`;
+      h += `<div class="row"><span class="label">${fmt(planet.semi_major_axis,'AU',1000)} | ${planet.cached_surface_temp||'?'}K${ws}</span><span class="val">${habBar} ${(hab/100).toFixed(0)}%</span></div>`;
+      h += `</div>`;
     }
-    h += `</div>`;
   }
 
   p.innerHTML = h;
   p.style.display = 'block';
 }
+
+window.clickPlanet = async function(id) {
+  // Find the planet in currentSystemData
+  const planet = currentSystemData?.planets?.find(p => p.id === id);
+  if (planet) await showPlanetPanel(planet);
+};
+
+async function showPlanetPanel(planet) {
+  const p = document.getElementById('panel');
+  const id = planet.id;
+
+  // Fetch composition + atmosphere in parallel
+  const [comp, atm] = await Promise.all([
+    fetch(`${PLANET_API}/planets/${id}/composition`).then(r => r.json()).catch(() => []),
+    fetch(`${PLANET_API}/planets/${id}/atmosphere`).then(r => r.json()).catch(() => []),
+  ]);
+
+  const col = rgbHex([planetColor(planet).r, planetColor(planet).g, planetColor(planet).b]);
+  const ws = WATER_STATES[planet.water_state] || 'none';
+  const hab = planet.cached_habitability || 0;
+
+  let h = `<span class="close" onclick="backToSystem()">&times;</span>`;
+  h += `<div style="margin-bottom:8px">${btn('&#8592; System', 'backToSystem()')}</div>`;
+  h += `<h2 style="color:${col}">${planet.name}</h2>`;
+  h += `<div class="row"><span class="label">Class</span><span class="val">${planet.class_name}</span></div>`;
+  h += `<div class="row"><span class="label">Orbit</span><span class="val">${fmt(planet.semi_major_axis,'AU',1000)} | e=${(planet.eccentricity/10000).toFixed(3)}</span></div>`;
+
+  // Habitability bar
+  const habCol = hab > 7000 ? '#44bb66' : hab > 4000 ? '#aa8833' : '#883333';
+  h += `<div style="margin:8px 0">`;
+  h += `<div class="row"><span class="label">Habitability</span><span class="val" style="color:${habCol}">${(hab/100).toFixed(0)}%</span></div>`;
+  h += `<div style="background:#1a1a1a;border-radius:4px;overflow:hidden;height:8px;margin-top:2px">`;
+  h += `<div style="width:${hab/100}%;height:100%;background:${habCol};border-radius:4px"></div></div></div>`;
+
+  h += `<h3>Physical</h3>`;
+  h += `<div class="row"><span class="label">Mass</span><span class="val">${fmt(planet.total_mass,'M\u2295',1000)}</span></div>`;
+  h += `<div class="row"><span class="label">Radius</span><span class="val">${fmt(planet.cached_radius,'R\u2295',1000)}</span></div>`;
+  h += `<div class="row"><span class="label">Gravity</span><span class="val">${fmt(planet.cached_gravity,'g',1000)}</span></div>`;
+  h += `<div class="row"><span class="label">Density</span><span class="val">${planet.cached_density} kg/m\u00b3</span></div>`;
+
+  h += `<h3>Surface</h3>`;
+  h += `<div class="row"><span class="label">Temperature</span><span class="val">${planet.cached_surface_temp} K</span></div>`;
+  h += `<div class="row"><span class="label">Pressure</span><span class="val">${fmt(planet.atm_pressure,'atm',1000)}</span></div>`;
+  h += `<div class="row"><span class="label">Water</span><span class="val">${ws} (${(planet.surface_water_frac/100).toFixed(0)}%)</span></div>`;
+  h += `<div class="row"><span class="label">Magnetic field</span><span class="val">${fmt(planet.magnetic_field,'',1000)} Earth</span></div>`;
+  h += `<div class="row"><span class="label">Tectonics</span><span class="val">${planet.tectonic_activity}</span></div>`;
+  h += `<div class="row"><span class="label">Volcanism</span><span class="val">${planet.volcanism}</span></div>`;
+
+  h += `<h3>Interior</h3>`;
+  h += `<div class="row"><span class="label">Core mass</span><span class="val">${(planet.core_mass_frac/100).toFixed(0)}%</span></div>`;
+  h += `<div class="row"><span class="label">Core iron</span><span class="val">${(planet.core_iron_frac/100).toFixed(0)}%</span></div>`;
+  h += `<div class="row"><span class="label">Core temp</span><span class="val">${planet.core_temp} K</span></div>`;
+
+  // Composition
+  if (comp.length > 0) {
+    h += `<h3>Composition</h3>`;
+    for (const c of comp) {
+      const pct = (c.mass_fraction / 100).toFixed(1);
+      h += `<div class="row"><span class="label">${c.material_name}</span><span class="val">`;
+      h += `<span style="display:inline-block;width:${Math.min(c.mass_fraction/100,100)}px;height:6px;background:#556;border-radius:3px;margin-right:4px;vertical-align:middle"></span>`;
+      h += `${pct}%</span></div>`;
+    }
+  }
+
+  // Atmosphere
+  if (atm.length > 0) {
+    h += `<h3>Atmosphere</h3>`;
+    for (const a of atm) {
+      const pct = (a.concentration / 100).toFixed(1);
+      h += `<div class="row"><span class="label">${a.material_name}</span><span class="val">`;
+      h += `<span style="display:inline-block;width:${Math.min(a.concentration/100,100)}px;height:6px;background:#557;border-radius:3px;margin-right:4px;vertical-align:middle"></span>`;
+      h += `${pct}%</span></div>`;
+    }
+  }
+
+  // Axial
+  h += `<h3>Axial</h3>`;
+  h += `<div class="row"><span class="label">Tilt</span><span class="val">${(planet.axial_tilt/100).toFixed(1)}\u00b0</span></div>`;
+  h += `<div class="row"><span class="label">Rotation</span><span class="val">${planet.rotation_period} ticks</span></div>`;
+  h += `<div class="row"><span class="label">Tidally locked</span><span class="val">${planet.is_tidally_locked ? 'yes' : 'no'}</span></div>`;
+
+  // Moons
+  const moons = await fetch(`${PLANET_API}/planets/${id}/moons`).then(r => r.json()).catch(() => []);
+  if (moons.length > 0) {
+    h += `<h3>Moons (${moons.length})</h3>`;
+    for (const moon of moons) {
+      const mcol = rgbHex([planetColor(moon).r, planetColor(moon).g, planetColor(moon).b]);
+      const mhab = moon.cached_habitability || 0;
+      h += `<div class="star-block" style="border-left:3px solid ${mcol};cursor:pointer" onclick="clickPlanet(${moon.id})">`;
+      h += `<b>${moon.name}</b> <span style="color:#888">${moon.class_name}</span>`;
+      h += `<div class="row"><span class="label">${moon.cached_surface_temp||'?'}K | ${fmt(moon.total_mass,'M\u2295',1000)}</span><span class="val">${(mhab/100).toFixed(0)}% hab</span></div>`;
+      h += `</div>`;
+    }
+  }
+
+  p.innerHTML = h;
+  p.style.display = 'block';
+
+  // Create and fly to the 3D globe
+  await createPlanetGlobe(planet);
+}
+
+window.backToSystem = function() {
+  // Destroy the globe before restoring system view
+  destroyPlanetGlobe();
+  if (currentSystemData) {
+    const { sys, starsData, envData, planets } = currentSystemData;
+    showSystemPanel(sys, starsData, envData, planets);
+    // Fly back to system overview
+    const targetPos = sysWorldPos(sys);
+    const primary = starsData.find(s => s.is_primary) || starsData[0];
+    let maxAU = (primary?.frost_line || 3000) / 1000;
+    for (const s of starsData) {
+      if (s.semi_major_axis) maxAU = Math.max(maxAU, s.semi_major_axis / 1000);
+    }
+    for (const p of planets) {
+      if (!p.id_parent) maxAU = Math.max(maxAU, p.semi_major_axis / 1000);
+    }
+    const zoomDist = Math.max(200, maxAU * ZONE_SCALE * 2.5);
+    flyTo(targetPos, zoomDist);
+  }
+};
 
 // -- Fly-to camera --
 let flyAnim = null;
@@ -557,6 +1248,7 @@ function flyTo(target, distance = 800) {
 }
 
 function flyOut() {
+  destroyPlanetGlobe();
   hideZones();
   selectedIdx = -1;
   flyTo(new THREE.Vector3(0, 0, 0), 14000);
@@ -610,6 +1302,10 @@ addEventListener('resize', () => {
 (function animate() {
   requestAnimationFrame(animate);
   controls.update();
+  // Auto-rotate the planet globe
+  if (planetGlobeGroup.visible && planetGlobeGroup.children.length > 0) {
+    planetGlobeGroup.rotation.y += 0.002;
+  }
   renderer.render(scene, camera);
 })();
 </script>
