@@ -28,7 +28,11 @@ canvas { display: block; }
   font-size: 13px; line-height: 1.6;
 }
 #panel h2 { color: #fff; font-size: 16px; margin-bottom: 8px; }
-#panel h3 { color: #aaa; font-size: 13px; margin: 12px 0 4px; border-bottom: 1px solid #333; padding-bottom: 2px; }
+#panel h3 { color: #aaa; font-size: 13px; margin: 12px 0 4px; border-bottom: 1px solid #333; padding-bottom: 2px; cursor: pointer; user-select: none; }
+#panel h3:hover { color: #ddd; }
+#panel h3::before { content: '\u25bc '; font-size: 9px; }
+#panel h3.collapsed::before { content: '\u25b6 '; }
+#panel .section.collapsed { display: none; }
 #panel .row { display: flex; justify-content: space-between; }
 #panel .label { color: #666; }
 #panel .val { color: #eee; }
@@ -69,7 +73,7 @@ canvas { display: block; }
   <span><i class="swatch" style="background:#b0c0ff"></i>B</span>
   <span><i class="swatch" style="background:#8099ff"></i>O</span>
 </div>
-<div id="controls-hint">WASD hop stars | Tab cycle planets | L discovery log | Scroll zoom | Click select | Esc back</div>
+<div id="controls-hint">WASD hop | Tab planets | R random jump | L log | Click select | Esc back</div>
 
 <script type="importmap">
 { "imports": {
@@ -1667,9 +1671,27 @@ async function showPlanetPanel(planet) {
 
   p.innerHTML = h;
   p.style.display = 'block';
+  makeCollapsible();
 
   // Create and fly to the 3D globe
   await createPlanetGlobe(planet);
+}
+
+// Make panel sections collapsible after rendering
+function makeCollapsible() {
+  document.querySelectorAll('#panel h3').forEach(h3 => {
+    if (h3.dataset.bound) return;
+    h3.dataset.bound = '1';
+    h3.addEventListener('click', () => {
+      h3.classList.toggle('collapsed');
+      // Toggle the next siblings until next h3 or end
+      let el = h3.nextElementSibling;
+      while (el && el.tagName !== 'H3') {
+        el.classList.toggle('collapsed');
+        el = el.nextElementSibling;
+      }
+    });
+  });
 }
 
 window.backToSystem = function() {
@@ -1737,6 +1759,19 @@ addEventListener('keydown', e => {
   if (k === 'l') {
     const disc = document.getElementById('discoveries');
     disc.style.display = disc.style.display === 'none' ? 'block' : 'none';
+    return;
+  }
+
+  // R: jump to random unexplored system
+  if (k === 'r' && !navigating) {
+    const unexplored = [];
+    for (let i = 0; i < systems.length; i++) {
+      if (!visitedSystems.has(i)) unexplored.push(i);
+    }
+    if (unexplored.length > 0) {
+      const pick = unexplored[Math.floor(Math.random() * unexplored.length)];
+      navigateToSystem(pick);
+    }
     return;
   }
 
