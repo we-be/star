@@ -50,6 +50,13 @@ canvas { display: block; }
 }
 #legend span { margin-right: 12px; }
 
+@keyframes notifSlide {
+  0% { opacity: 0; transform: translateY(20px); }
+  15% { opacity: 1; transform: translateY(0); }
+  80% { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-20px); }
+}
+
 #controls-hint {
   position: absolute; bottom: 16px; right: 16px;
   font-size: 11px; opacity: 0.4;
@@ -72,6 +79,11 @@ canvas { display: block; }
   <span><i class="swatch" style="background:#eef0ff"></i>A</span>
   <span><i class="swatch" style="background:#b0c0ff"></i>B</span>
   <span><i class="swatch" style="background:#8099ff"></i>O</span>
+</div>
+<div id="notif-container" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);pointer-events:none;z-index:10"></div>
+<div id="galaxy-stats" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:400px;background:rgba(8,8,16,0.95);border:1px solid #333;border-radius:12px;padding:20px;display:none;font-size:13px;line-height:1.8;z-index:5">
+  <div style="text-align:center;color:#888;margin-bottom:8px;font-size:11px">GALAXY OVERVIEW <span style="float:right;cursor:pointer;color:#555" onclick="this.parentElement.parentElement.style.display='none'">&times;</span></div>
+  <div id="galaxy-stats-content"></div>
 </div>
 <div id="controls-hint">WASD hop | Tab planets | R random | L log | 1-7 filter OBAFGKM | 0 clear | Esc back</div>
 
@@ -1236,24 +1248,36 @@ function trackDiscovery(planets, sysIdx) {
   discovery.planets += mainPlanets.length;
   discovery.moons += moons.length;
 
-  // Log notable discoveries
+  // Log notable discoveries with notifications
   for (const p of mainPlanets) {
     const hab = p.cached_habitability || 0;
     if (hab > discovery.bestHab) {
       discovery.bestHab = hab;
       discovery.bestName = p.name;
     }
-    // Log habitable worlds
+    // Habitable worlds
     if (hab > 7000) {
       discoveryLog.push({ type: 'habitable', name: p.name, detail: `${(hab/100).toFixed(0)}% hab in ${sys.name}`, score: hab, sysIdx, planetId: p.id });
+      if (hab > 9000) showNotification('\ud83c\udf0d', `Paradise Found: ${p.name}`, `${(hab/100).toFixed(0)}% habitability — a rare gem`, '#44bb66');
+      else showNotification('\ud83c\udf0d', `Habitable World: ${p.name}`, `${(hab/100).toFixed(0)}% habitability`, '#558844');
     }
-    // Log water worlds
+    // Water worlds
     if (p.water_state === 1 && p.surface_water_frac > 3000) {
       discoveryLog.push({ type: 'ocean', name: p.name, detail: `${(p.surface_water_frac/100).toFixed(0)}% ocean in ${sys.name}`, score: p.surface_water_frac, sysIdx, planetId: p.id });
+      showNotification('\ud83c\udf0a', `Ocean World: ${p.name}`, `${(p.surface_water_frac/100).toFixed(0)}% surface water`, '#4488aa');
     }
-    // Log gas giants
+    // Gas giants
     if (p.class_name === 'gas_giant') {
       discoveryLog.push({ type: 'giant', name: p.name, detail: `${(p.total_mass/1000).toFixed(1)}M\u2295 in ${sys.name}`, score: p.total_mass, sysIdx, planetId: p.id });
+    }
+    // Extreme worlds
+    if ((p.cached_surface_temp || 0) > 1000) {
+      discoveryLog.push({ type: 'extreme', name: p.name, detail: `${p.cached_surface_temp}K inferno in ${sys.name}`, score: p.cached_surface_temp, sysIdx, planetId: p.id });
+      showNotification('\ud83d\udd25', `Inferno: ${p.name}`, `${p.cached_surface_temp}K surface — molten hell`, '#cc4422');
+    }
+    // Frozen worlds
+    if ((p.cached_surface_temp || 300) < 100 && p.total_mass > 500) {
+      discoveryLog.push({ type: 'frozen', name: p.name, detail: `${p.cached_surface_temp}K frozen in ${sys.name}`, score: 10000 - (p.cached_surface_temp || 0), sysIdx, planetId: p.id });
     }
   }
 
@@ -1273,11 +1297,85 @@ function trackDiscovery(planets, sysIdx) {
 function updateDiscoveryPanel() {
   const el = document.getElementById('disc-content');
   if (!el || discoveryLog.length === 0) return;
-  const icons = { habitable: '\ud83c\udf0d', ocean: '\ud83c\udf0a', giant: '\ud83e\ude90' };
-  el.innerHTML = discoveryLog.slice(0, 15).map(d =>
+  const icons = { habitable: '\ud83c\udf0d', ocean: '\ud83c\udf0a', giant: '\ud83e\ude90', extreme: '\ud83d\udd25', frozen: '\u2744\ufe0f', exotic: '\ud83d\udc8e' };
+  el.innerHTML = discoveryLog.slice(0, 20).map(d =>
     `<div style="margin:3px 0;cursor:pointer" onclick="goToDiscovery(${d.sysIdx},${d.planetId})"><span style="margin-right:4px">${icons[d.type]||'\u2b50'}</span><b style="color:#ddd">${d.name}</b> <span style="color:#777">${d.detail}</span></div>`
   ).join('');
 }
+
+// Discovery notification banner
+function showNotification(icon, title, detail, color = '#4af') {
+  const container = document.getElementById('notif-container');
+  const el = document.createElement('div');
+  el.style.cssText = `
+    text-align:center; padding:12px 24px; margin:4px; border-radius:8px;
+    background:rgba(8,12,20,0.9); border:1px solid ${color}40;
+    color:${color}; font-family:inherit; font-size:14px;
+    animation: notifSlide 3s ease-out forwards;
+    pointer-events:none;
+  `;
+  el.innerHTML = `<span style="font-size:20px;margin-right:8px">${icon}</span><b>${title}</b><br><span style="color:#888;font-size:12px">${detail}</span>`;
+  container.appendChild(el);
+  setTimeout(() => el.remove(), 3500);
+}
+
+// Galaxy overview stats
+function showGalaxyStats() {
+  const el = document.getElementById('galaxy-stats');
+  const c = document.getElementById('galaxy-stats-content');
+  if (el.style.display !== 'none') { el.style.display = 'none'; return; }
+
+  const pct = (discovery.explored / count * 100).toFixed(1);
+  const habWorlds = discoveryLog.filter(d => d.type === 'habitable').length;
+  const oceanWorlds = discoveryLog.filter(d => d.type === 'ocean').length;
+  const giants = discoveryLog.filter(d => d.type === 'giant').length;
+  const extremes = discoveryLog.filter(d => d.type === 'extreme' || d.type === 'frozen').length;
+
+  // Spectral breakdown of explored systems
+  const spectralCounts = {};
+  for (const idx of visitedOrder) {
+    const t = tempToSpectral(systems[idx]._temp);
+    spectralCounts[t] = (spectralCounts[t] || 0) + 1;
+  }
+
+  let h = '';
+  h += `<div style="text-align:center;margin-bottom:12px">`;
+  h += `<div style="font-size:24px;color:#fff">${discovery.explored} <span style="color:#666;font-size:14px">/ ${count} systems explored</span></div>`;
+  h += `<div style="background:#1a1a2a;border-radius:4px;overflow:hidden;height:6px;margin:8px 20%">`;
+  h += `<div style="width:${pct}%;height:100%;background:#4af;border-radius:4px"></div></div>`;
+  h += `</div>`;
+
+  h += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0">`;
+  h += `<div style="text-align:center;padding:8px;background:rgba(255,255,255,0.03);border-radius:6px"><div style="font-size:20px;color:#4a4">${discovery.planets}</div><div style="color:#666;font-size:11px">planets</div></div>`;
+  h += `<div style="text-align:center;padding:8px;background:rgba(255,255,255,0.03);border-radius:6px"><div style="font-size:20px;color:#668">${discovery.moons}</div><div style="color:#666;font-size:11px">moons</div></div>`;
+  h += `<div style="text-align:center;padding:8px;background:rgba(255,255,255,0.03);border-radius:6px"><div style="font-size:20px;color:#4b4">${habWorlds}</div><div style="color:#666;font-size:11px">habitable</div></div>`;
+  h += `<div style="text-align:center;padding:8px;background:rgba(255,255,255,0.03);border-radius:6px"><div style="font-size:20px;color:#48a">${oceanWorlds}</div><div style="color:#666;font-size:11px">ocean worlds</div></div>`;
+  h += `</div>`;
+
+  if (discovery.bestName) {
+    h += `<div style="text-align:center;margin:12px 0;padding:10px;background:rgba(68,187,102,0.08);border:1px solid #4b432;border-radius:6px">`;
+    h += `<div style="color:#666;font-size:11px">MOST HABITABLE</div>`;
+    h += `<div style="font-size:16px;color:#4b4">${discovery.bestName} <span style="color:#888">${(discovery.bestHab/100).toFixed(0)}%</span></div>`;
+    h += `</div>`;
+  }
+
+  // Spectral breakdown
+  if (Object.keys(spectralCounts).length > 0) {
+    h += `<div style="margin-top:12px"><div style="color:#666;font-size:11px;margin-bottom:4px">SPECTRAL TYPES VISITED</div>`;
+    for (const letter of ['O','B','A','F','G','K','M']) {
+      const n = spectralCounts[letter] || 0;
+      if (n === 0) continue;
+      const [r,g,b] = tempToRGB({O:40000,B:20000,A:9000,F:7000,G:5800,K:4500,M:3000}[letter]);
+      const col = rgbHex([r,g,b]);
+      h += `<div class="row" style="font-size:12px"><span style="color:${col}">${letter}</span><span class="val">${n} systems</span></div>`;
+    }
+    h += `</div>`;
+  }
+
+  c.innerHTML = h;
+  el.style.display = 'block';
+}
+window.showGalaxyStats = showGalaxyStats;
 
 window.goToDiscovery = async function(sysIdx, planetId) {
   document.getElementById('discoveries').style.display = 'none';
@@ -1893,6 +1991,12 @@ addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
 
   if (k === 'escape') { flyOut(); return; }
+
+  // G: galaxy overview stats
+  if (k === 'g' && selectedIdx < 0) {
+    showGalaxyStats();
+    return;
+  }
 
   // L: toggle discovery log
   if (k === 'l') {
