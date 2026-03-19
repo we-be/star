@@ -1240,9 +1240,12 @@ function updateHUD() {
   if (discovery.explored === 0) {
     document.getElementById('hud').textContent = base;
   } else {
+    const empireTag = empire.claimedPlanets.length > 0
+      ? ` | empire: ${empire.claimedPlanets.length} worlds, ${empire.settlements.length} settlements`
+      : '';
     const best = discovery.bestName ? ` | best: ${discovery.bestName} (${(discovery.bestHab/100).toFixed(0)}%)` : '';
     document.getElementById('hud').textContent =
-      `${base} | explored ${discovery.explored} | ${discovery.planets} planets ${discovery.moons} moons${best}`;
+      `explored ${discovery.explored}/${count} | ${discovery.planets} planets ${discovery.moons} moons${empireTag}${best}`;
   }
 }
 
@@ -2395,6 +2398,20 @@ function drawMinimap() {
       mctx.lineTo(ox + s.pos_x * scale, oy + s.pos_y * scale);
     }
     mctx.stroke();
+  }
+
+  // Draw claimed systems as bright green diamonds
+  for (const cp of empire.claimedPlanets) {
+    const s = systems[cp.sysIdx];
+    if (!s) continue;
+    const sx = ox + s.pos_x * scale;
+    const sy = oy + s.pos_y * scale;
+    mctx.fillStyle = '#4c4';
+    mctx.save();
+    mctx.translate(sx, sy);
+    mctx.rotate(Math.PI / 4);
+    mctx.fillRect(-2.5, -2.5, 5, 5);
+    mctx.restore();
   }
 
   // Draw current position as bright dot
