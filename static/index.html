@@ -97,11 +97,7 @@ canvas { display: block; }
   <div style="text-align:center;color:#888;margin-bottom:8px;font-size:11px">GALAXY OVERVIEW <span style="float:right;cursor:pointer;color:#555" onclick="this.parentElement.parentElement.style.display='none'">&times;</span></div>
   <div id="galaxy-stats-content"></div>
 </div>
-<div id="empire-panel" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:420px;background:rgba(8,8,16,0.95);border:1px solid #3a5a3a;border-radius:12px;padding:20px;display:none;font-size:13px;line-height:1.8;z-index:5;max-height:80vh;overflow-y:auto">
-  <div style="text-align:center;color:#4b4;margin-bottom:8px;font-size:11px">MY EMPIRE <span style="float:right;cursor:pointer;color:#555" onclick="this.parentElement.parentElement.style.display='none'">&times;</span></div>
-  <div id="empire-content"></div>
-</div>
-<div id="controls-hint">WASD hop | Tab planets | / search | R random | E empire | L log | G stats | 1-7 filter | Esc back</div>
+<div id="controls-hint">WASD hop | Tab planets | / search | R random | L log | G stats | 1-7 filter | Esc back</div>
 
 <script type="importmap">
 { "imports": {
@@ -769,7 +765,7 @@ function createIcosphere(radius, subdivisions) {
 
 // Assign faces to regions and color them
 function buildGlobeGeometry(globeRadius, regions) {
-  const { positions, normals, faceCenters, faceCount } = createIcosphere(globeRadius, 4);
+  const { positions, normals, faceCenters, faceCount } = createIcosphere(globeRadius, 5);
   const colors = new Float32Array(faceCount * 9);
 
   // Sort regions: oceans first, then by area_fraction descending
@@ -1020,60 +1016,6 @@ function addFeatureMarkers(group, features, globeRadius) {
   }
 }
 
-// Settlement markers on globe — glowing beacons
-function addSettlementMarkers(group, settlements, globeRadius) {
-  for (let si = 0; si < settlements.length; si++) {
-    const s = settlements[si];
-    // Deterministic position from settlement name
-    let hash = 0;
-    for (let i = 0; i < s.name.length; i++) hash = ((hash << 5) - hash + s.name.charCodeAt(i)) | 0;
-    const phi = Math.acos(2 * (((hash & 0xffff) ^ (si * 7919)) & 0xffff) / 0xffff - 1);
-    const theta = (((hash >> 16) ^ (si * 6271)) & 0xffff) / 0xffff * Math.PI * 2;
-    const px = globeRadius * Math.sin(phi) * Math.cos(theta);
-    const py = globeRadius * Math.cos(phi);
-    const pz = globeRadius * Math.sin(phi) * Math.sin(theta);
-
-    const isCapital = s.is_capital;
-    const beaconSize = isCapital ? 2.5 : 1.5;
-    const beaconColor = isCapital ? 0xffcc44 : 0x44aaff;
-
-    // Beacon core
-    const core = new THREE.Mesh(
-      new THREE.SphereGeometry(beaconSize, 8, 8),
-      new THREE.MeshBasicMaterial({ color: beaconColor })
-    );
-    const outward = new THREE.Vector3(px, py, pz).normalize();
-    core.position.set(px, py, pz).add(outward.clone().multiplyScalar(beaconSize));
-    group.add(core);
-
-    // Glow
-    const glow = new THREE.Mesh(
-      new THREE.SphereGeometry(beaconSize * 3, 8, 8),
-      new THREE.MeshBasicMaterial({
-        color: beaconColor, transparent: true, opacity: 0.15,
-        blending: THREE.AdditiveBlending, depthWrite: false,
-      })
-    );
-    glow.position.copy(core.position);
-    group.add(glow);
-
-    // Label
-    const c = document.createElement('canvas');
-    c.width = 256; c.height = 48;
-    const ctx = c.getContext('2d');
-    ctx.font = `bold ${isCapital ? 22 : 18}px Courier New`;
-    ctx.fillStyle = isCapital ? '#ffcc44' : '#88bbdd';
-    ctx.textAlign = 'center';
-    ctx.fillText(s.name, 128, 32);
-    const sprite = new THREE.Sprite(
-      new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false, depthTest: false })
-    );
-    sprite.scale.set(80, 15, 1);
-    sprite.position.copy(core.position).add(outward.clone().multiplyScalar(8));
-    group.add(sprite);
-  }
-}
-
 // Create atmosphere shell
 function addAtmosphere(group, globeRadius, planet) {
   const ws = planet.water_state;
@@ -1137,11 +1079,10 @@ async function createPlanetGlobe(planet) {
 
   planetGlobeGroup.position.copy(worldPos);
 
-  // Fetch regions, features, and settlements
-  const [regions, features, globeSettlements] = await Promise.all([
+  // Fetch regions and features
+  const [regions, features] = await Promise.all([
     fetch(`${PLANET_API}/planets/${planet.id}/regions`).then(r => r.json()).catch(() => []),
     fetch(`${PLANET_API}/planets/${planet.id}/features`).then(r => r.json()).catch(() => []),
-    fetch(`${PLANET_API}/planets/${planet.id}/settlements`).then(r => r.json()).catch(() => []),
   ]);
 
   const isGasGiant = planet.class_name === 'gas_giant' || planet.class_name === 'ice_giant';
@@ -1196,7 +1137,6 @@ async function createPlanetGlobe(planet) {
     planetGlobeGroup.add(new THREE.Mesh(globeGeo, globeMat));
     addAtmosphere(planetGlobeGroup, globeRadius, planet);
     if (features.length > 0) addFeatureMarkers(planetGlobeGroup, features, globeRadius);
-    if (globeSettlements.length > 0) addSettlementMarkers(planetGlobeGroup, globeSettlements, globeRadius);
   } else {
     // Fallback: solid sphere
     planetGlobeGroup.add(new THREE.Mesh(
@@ -1207,6 +1147,8 @@ async function createPlanetGlobe(planet) {
   }
 
   planetGlobeGroup.visible = true;
+  hideLaneHighlights();
+  zoneGroup.visible = false;
 
   // Fly camera to the globe
   const camDist = globeRadius * 3;
@@ -1240,12 +1182,9 @@ function updateHUD() {
   if (discovery.explored === 0) {
     document.getElementById('hud').textContent = base;
   } else {
-    const empireTag = empire.claimedPlanets.length > 0
-      ? ` | empire: ${empire.claimedPlanets.length} worlds, ${empire.settlements.length} settlements`
-      : '';
     const best = discovery.bestName ? ` | best: ${discovery.bestName} (${(discovery.bestHab/100).toFixed(0)}%)` : '';
     document.getElementById('hud').textContent =
-      `explored ${discovery.explored}/${count} | ${discovery.planets} planets ${discovery.moons} moons${empireTag}${best}`;
+      `explored ${discovery.explored}/${count} | ${discovery.planets} planets ${discovery.moons} moons${best}`;
   }
 }
 
@@ -1253,13 +1192,6 @@ const visitedSystems = new Set();
 const visitedOrder = []; // indices in order of exploration
 const visitedInfo = {}; // idx → { planets, bestHab, bestName }
 
-// Empire state
-const empire = {
-  claimedPlanets: [], // { id, name, sysIdx, systemName, hab, class_name }
-  settlements: [],    // { name, planetName, region, pop }
-  inventory: {},      // material_name → total mined
-  totalMined: 0,
-};
 const discoveryLog = []; // { type, name, detail, score }
 
 function trackDiscovery(planets, sysIdx) {
@@ -1404,63 +1336,6 @@ function showGalaxyStats() {
 }
 window.showGalaxyStats = showGalaxyStats;
 
-function showEmpirePanel() {
-  const el = document.getElementById('empire-panel');
-  const c = document.getElementById('empire-content');
-  if (el.style.display !== 'none') { el.style.display = 'none'; return; }
-
-  let h = '';
-
-  // Summary
-  const totalPop = empire.settlements.reduce((s, st) => s + st.pop, 0);
-  h += `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px">`;
-  h += `<div style="text-align:center;padding:8px;background:rgba(68,187,102,0.06);border-radius:6px"><div style="font-size:22px;color:#4b4">${empire.claimedPlanets.length}</div><div style="color:#666;font-size:10px">planets</div></div>`;
-  h += `<div style="text-align:center;padding:8px;background:rgba(68,136,170,0.06);border-radius:6px"><div style="font-size:22px;color:#48a">${empire.settlements.length}</div><div style="color:#666;font-size:10px">settlements</div></div>`;
-  h += `<div style="text-align:center;padding:8px;background:rgba(170,136,51,0.06);border-radius:6px"><div style="font-size:22px;color:#a83">${empire.totalMined.toLocaleString()}</div><div style="color:#666;font-size:10px">mined</div></div>`;
-  h += `</div>`;
-
-  // Claimed planets
-  if (empire.claimedPlanets.length > 0) {
-    h += `<div style="color:#4b4;font-size:11px;margin:8px 0 4px">CLAIMED WORLDS</div>`;
-    for (const p of empire.claimedPlanets) {
-      h += `<div style="margin:3px 0;cursor:pointer;font-size:12px" onclick="goToDiscovery(${p.sysIdx},${p.id})">`;
-      h += `<b style="color:#ddd">${p.name}</b> <span style="color:#888">${p.class_name} in ${p.systemName}</span>`;
-      h += `</div>`;
-    }
-  }
-
-  // Settlements
-  if (empire.settlements.length > 0) {
-    h += `<div style="color:#48a;font-size:11px;margin:12px 0 4px">SETTLEMENTS (pop ${totalPop})</div>`;
-    for (const s of empire.settlements) {
-      h += `<div style="margin:2px 0;font-size:12px">`;
-      h += `<b style="color:#ddd">${s.name}</b> <span style="color:#666">${s.region}, ${s.planetName}</span>`;
-      h += `<span style="float:right;color:#888">${s.pop} pop</span>`;
-      h += `</div>`;
-    }
-  }
-
-  // Inventory
-  const invEntries = Object.entries(empire.inventory).sort((a, b) => b[1] - a[1]);
-  if (invEntries.length > 0) {
-    h += `<div style="color:#a83;font-size:11px;margin:12px 0 4px">RESOURCE INVENTORY</div>`;
-    for (const [name, qty] of invEntries) {
-      const barW = Math.min(100, qty / 50);
-      h += `<div class="row" style="font-size:12px;margin:2px 0">`;
-      h += `<span style="color:#ddd">${name}</span>`;
-      h += `<span class="val"><span style="display:inline-block;width:${barW}px;height:5px;background:#a83;border-radius:2px;margin-right:6px;vertical-align:middle"></span>${qty.toLocaleString()}</span>`;
-      h += `</div>`;
-    }
-  }
-
-  if (empire.claimedPlanets.length === 0) {
-    h += `<div style="text-align:center;color:#555;margin:20px 0">No claims yet. Explore and claim a planet to start your empire.</div>`;
-  }
-
-  c.innerHTML = h;
-  el.style.display = 'block';
-}
-
 window.goToDiscovery = async function(sysIdx, planetId) {
   document.getElementById('discoveries').style.display = 'none';
   await navigateToSystem(sysIdx);
@@ -1475,21 +1350,6 @@ window.goToDiscovery = async function(sysIdx, planetId) {
 };
 
 const visitedMarkers = {}; // idx → mesh
-const claimedMarkers = {}; // idx → mesh
-
-function markClaimed(idx) {
-  if (claimedMarkers[idx]) return;
-  const s = systems[idx];
-  const p = sysWorldPos(s);
-  // Bright pulsing diamond shape for claimed systems
-  const geo = new THREE.OctahedronGeometry(25);
-  const mat = new THREE.MeshBasicMaterial({ color: 0x44bb66, transparent: true, opacity: 0.3, wireframe: true, depthWrite: false });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.position.copy(p);
-  mesh.userData.claimed = true;
-  scene.add(mesh);
-  claimedMarkers[idx] = mesh;
-}
 
 function markVisited(idx, bestHab) {
   const s = systems[idx];
@@ -1752,61 +1612,6 @@ function showSystemPanel(sys, stars, env, planets) {
   p.style.display = 'block';
 }
 
-window.claimPlanet = async function(planetId) {
-  const res = await fetch(`${PLANET_API}/planets/${planetId}/claim`, {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({owner_id: 1})
-  }).then(r => r.json()).catch(() => null);
-  if (res?.status === 'claimed') {
-    showNotification('\ud83c\udff4', 'Planet Claimed!', 'This world is now yours', '#44bb66');
-    const planet = currentSystemData?.planets?.find(p => p.id === planetId);
-    if (planet) {
-      planet.id_owner = { Valid: true, Int64: 1 };
-      empire.claimedPlanets.push({
-        id: planet.id, name: planet.name, sysIdx: selectedIdx,
-        systemName: systems[selectedIdx]?.name || '?',
-        hab: planet.cached_habitability || 0, class_name: planet.class_name,
-      });
-      // Mark system as claimed in galaxy view
-      markClaimed(selectedIdx);
-      await showPlanetPanel(planet);
-    }
-  }
-};
-
-window.foundSettlement = async function(planetId, regionId, regionName) {
-  const name = prompt(`Name your settlement in ${regionName}:`, `New ${regionName.split(' ')[0]}`);
-  if (!name) return;
-  const res = await fetch(`${PLANET_API}/planets/${planetId}/settle`, {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({region_id: regionId, name})
-  }).then(r => r.json()).catch(() => null);
-  if (res?.id) {
-    const planet = currentSystemData?.planets?.find(p => p.id === planetId);
-    empire.settlements.push({ name, planetName: planet?.name || '?', region: regionName, pop: 25 });
-    showNotification('\u26fa', `Settlement Founded: ${name}`, `Population: 25 in ${regionName}`, '#4488aa');
-    if (planet) await showPlanetPanel(planet);
-  }
-};
-
-window.mineDeposit = async function(depositId, planetId, materialName) {
-  const res = await fetch(`${PLANET_API}/deposits/${depositId}/mine`, {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({amount: 100})
-  }).then(r => r.json()).catch(e => ({error: 'failed'}));
-  if (res?.error) {
-    showNotification('\u26a0\ufe0f', 'Mining Failed', res.error, '#cc4422');
-  } else {
-    const remaining = res.abundance - res.depleted;
-    const matName = materialName || 'resource';
-    empire.inventory[matName] = (empire.inventory[matName] || 0) + 100;
-    empire.totalMined += 100;
-    showNotification('\u26cf\ufe0f', `Mined ${matName}`, `+100 units (${remaining} remaining)`, '#aa8833');
-    const planet = currentSystemData?.planets?.find(p => p.id === planetId);
-    if (planet) await showPlanetPanel(planet);
-  }
-};
-
 window.clickPlanet = async function(id) {
   // Find the planet in currentSystemData
   const planet = currentSystemData?.planets?.find(p => p.id === id);
@@ -1849,12 +1654,6 @@ async function showPlanetPanel(planet) {
   let h = `<span class="close" onclick="backToSystem()">&times;</span>`;
   h += `<div style="margin-bottom:8px">${btn('&#8592; System', 'backToSystem()')}</div>`;
   h += `<h2 style="color:${col}">${planet.name}</h2>`;
-  const owned = planet.id_owner?.Valid;
-  if (!owned && planet.class_name !== 'gas_giant' && planet.class_name !== 'ice_giant') {
-    h += `<div style="margin:6px 0"><button onclick="claimPlanet(${planet.id})" style="background:#1a2a1a;color:#4b4;border:1px solid #3a5a3a;padding:6px 14px;border-radius:4px;cursor:pointer;font-family:inherit;font-size:12px;width:100%">Claim Planet</button></div>`;
-  } else if (owned) {
-    h += `<div style="margin:4px 0;padding:4px 8px;background:rgba(68,187,102,0.08);border-radius:4px;text-align:center;color:#4b4;font-size:11px">CLAIMED</div>`;
-  }
   h += `<div class="row"><span class="label">Class</span><span class="val">${planet.class_name}</span></div>`;
   h += `<div class="row"><span class="label">Orbit</span><span class="val">${fmt(planet.semi_major_axis,'AU',1000)} | e=${(planet.eccentricity/10000).toFixed(3)}</span></div>`;
 
@@ -1917,14 +1716,11 @@ async function showPlanetPanel(planet) {
       barren:'#6a6058', toxic:'#4a5a2a', temperate:'#4a8a4a', tropical:'#2a7a3a',
       swamp:'#3a5a3a',
     };
-    const isLandType = n => !['ocean','sea'].includes(n);
     for (const r of regions.slice(0, 8)) {
       const bc = biomeCols[r.biome_name] || '#666';
-      const canSettle = isLandType(r.biome_name) && owned;
       h += `<div style="display:flex;align-items:center;margin:2px 0">`;
       h += `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${bc};margin-right:6px;flex-shrink:0"></span>`;
       h += `<span class="label" style="flex:1;font-size:11px">${r.name}</span>`;
-      if (canSettle) h += `<span style="cursor:pointer;color:#4a8;font-size:10px;margin-right:6px" onclick="foundSettlement(${planet.id},${r.id},'${r.name.replace(/'/g,'')}')">[settle]</span>`;
       h += `<span class="val" style="font-size:11px;color:#888">${r.biome_name} ${(r.area_fraction/100).toFixed(0)}%</span>`;
       h += `</div>`;
     }
@@ -1975,7 +1771,6 @@ async function showPlanetPanel(planet) {
       h += `<span class="val" style="display:flex;align-items:center;gap:4px">`;
       h += `<span style="display:inline-block;width:${barW}px;height:5px;background:#665;border-radius:2px"></span>`;
       h += `${data.total.toLocaleString()}`;
-      if (owned && data.total > 0) h += ` <span style="cursor:pointer;color:#aa8;font-size:10px" onclick="mineDeposit(${data.bestId},${planet.id},'${name}')">[mine]</span>`;
       h += `</span></div>`;
     }
     if (sorted.length > 10) h += `<div style="color:#555;font-size:11px">+${sorted.length - 10} more</div>`;
@@ -1986,24 +1781,6 @@ async function showPlanetPanel(planet) {
   h += `<div class="row"><span class="label">Tilt</span><span class="val">${(planet.axial_tilt/100).toFixed(1)}\u00b0</span></div>`;
   h += `<div class="row"><span class="label">Rotation</span><span class="val">${planet.rotation_period} ticks</span></div>`;
   h += `<div class="row"><span class="label">Tidally locked</span><span class="val">${planet.is_tidally_locked ? 'yes' : 'no'}</span></div>`;
-
-  // Settlements
-  const settlements = await fetch(`${PLANET_API}/planets/${id}/settlements`).then(r => r.json()).catch(() => []);
-  if (settlements.length > 0) {
-    const totalPop = settlements.reduce((sum, s) => sum + s.population, 0);
-    h += `<h3>Settlements (pop ${totalPop.toLocaleString()})</h3>`;
-    const typeIcons = { colony: '\ud83c\udfe0', outpost: '\u26fa', mining_camp: '\u26cf\ufe0f', research_station: '\ud83d\udd2c' };
-    for (const s of settlements) {
-      const icon = typeIcons[s.settlement_type] || '\ud83c\udfe0';
-      h += `<div style="display:flex;align-items:center;margin:3px 0;font-size:11px">`;
-      h += `<span style="margin-right:5px">${icon}</span>`;
-      h += `<span style="flex:1"><b style="color:#ddd">${s.name}</b>`;
-      if (s.is_capital) h += ` <span style="color:#aa8833;font-size:10px">CAPITAL</span>`;
-      h += `</span>`;
-      h += `<span class="val" style="color:#888">${s.population.toLocaleString()} pop</span>`;
-      h += `</div>`;
-    }
-  }
 
   // Moons
   const moons = await fetch(`${PLANET_API}/planets/${id}/moons`).then(r => r.json()).catch(() => []);
@@ -2047,6 +1824,8 @@ function makeCollapsible() {
 window.backToSystem = function() {
   // Destroy the globe before restoring system view
   destroyPlanetGlobe();
+  zoneGroup.visible = true;
+  if (selectedIdx >= 0) showLaneHighlights(selectedIdx);
   if (currentSystemData) {
     const { sys, starsData, envData, planets } = currentSystemData;
     showSystemPanel(sys, starsData, envData, planets);
@@ -2242,12 +2021,6 @@ addEventListener('keydown', e => {
     return;
   }
 
-  // E: empire overview
-  if (k === 'e') {
-    showEmpirePanel();
-    return;
-  }
-
   // G: galaxy overview stats
   if (k === 'g' && selectedIdx < 0) {
     showGalaxyStats();
@@ -2400,20 +2173,6 @@ function drawMinimap() {
     mctx.stroke();
   }
 
-  // Draw claimed systems as bright green diamonds
-  for (const cp of empire.claimedPlanets) {
-    const s = systems[cp.sysIdx];
-    if (!s) continue;
-    const sx = ox + s.pos_x * scale;
-    const sy = oy + s.pos_y * scale;
-    mctx.fillStyle = '#4c4';
-    mctx.save();
-    mctx.translate(sx, sy);
-    mctx.rotate(Math.PI / 4);
-    mctx.fillRect(-2.5, -2.5, 5, 5);
-    mctx.restore();
-  }
-
   // Draw current position as bright dot
   mctx.fillStyle = '#4af';
   mctx.beginPath();
@@ -2467,12 +2226,6 @@ let frameCount = 0;
       mesh.position.x = offsetX + Math.cos(angle) * orbitR;
       mesh.position.z = Math.sin(angle) * orbitR;
     }
-  }
-
-  // Pulse claimed system markers
-  for (const mesh of Object.values(claimedMarkers)) {
-    mesh.rotation.y += 0.005;
-    mesh.material.opacity = 0.2 + Math.sin((time || 0) * 0.003) * 0.1;
   }
 
   // Twinkle stars in galaxy view — subtle size oscillation
