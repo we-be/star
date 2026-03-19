@@ -1515,6 +1515,24 @@ async function showPlanetPanel(planet) {
   h += `<div class="row"><span class="label">Rotation</span><span class="val">${planet.rotation_period} ticks</span></div>`;
   h += `<div class="row"><span class="label">Tidally locked</span><span class="val">${planet.is_tidally_locked ? 'yes' : 'no'}</span></div>`;
 
+  // Settlements
+  const settlements = await fetch(`${PLANET_API}/planets/${id}/settlements`).then(r => r.json()).catch(() => []);
+  if (settlements.length > 0) {
+    const totalPop = settlements.reduce((sum, s) => sum + s.population, 0);
+    h += `<h3>Settlements (pop ${totalPop.toLocaleString()})</h3>`;
+    const typeIcons = { colony: '\ud83c\udfe0', outpost: '\u26fa', mining_camp: '\u26cf\ufe0f', research_station: '\ud83d\udd2c' };
+    for (const s of settlements) {
+      const icon = typeIcons[s.settlement_type] || '\ud83c\udfe0';
+      h += `<div style="display:flex;align-items:center;margin:3px 0;font-size:11px">`;
+      h += `<span style="margin-right:5px">${icon}</span>`;
+      h += `<span style="flex:1"><b style="color:#ddd">${s.name}</b>`;
+      if (s.is_capital) h += ` <span style="color:#aa8833;font-size:10px">CAPITAL</span>`;
+      h += `</span>`;
+      h += `<span class="val" style="color:#888">${s.population.toLocaleString()} pop</span>`;
+      h += `</div>`;
+    }
+  }
+
   // Moons
   const moons = await fetch(`${PLANET_API}/planets/${id}/moons`).then(r => r.json()).catch(() => []);
   if (moons.length > 0) {
