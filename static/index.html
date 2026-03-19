@@ -213,13 +213,12 @@ scene.add(pointCloud);
 // ============================================================
 // JUMP LANES — subtle lines between nearby systems
 // ============================================================
-{
-  const LANE_MAX_DIST = 1500; // max connection distance
-  const LANE_MAX_PER = 3;     // max connections per system
-  const lanePositions = [];
+const LANE_MAX_DIST = 1500;
+const LANE_MAX_PER = 3;
+const laneConnections = new Array(count).fill(null).map(() => []);
 
-  // Build adjacency by nearest neighbors
-  const connections = new Array(count).fill(null).map(() => []);
+{
+  const lanePositions = [];
 
   for (let i = 0; i < count; i++) {
     const pi = sysWorldPos(systems[i]);
@@ -232,9 +231,9 @@ scene.add(pointCloud);
     dists.sort((a, b) => a.d - b.d);
 
     for (const { j } of dists.slice(0, LANE_MAX_PER)) {
-      if (connections[i].length >= LANE_MAX_PER || connections[j].length >= LANE_MAX_PER) continue;
-      connections[i].push(j);
-      connections[j].push(i);
+      if (laneConnections[i].length >= LANE_MAX_PER || laneConnections[j].length >= LANE_MAX_PER) continue;
+      laneConnections[i].push(j);
+      laneConnections[j].push(i);
       const pi2 = sysWorldPos(systems[i]);
       const pj2 = sysWorldPos(systems[j]);
       lanePositions.push(pi2.x, pi2.y, pi2.z, pj2.x, pj2.y, pj2.z);
@@ -249,6 +248,78 @@ scene.add(pointCloud);
     });
     scene.add(new THREE.LineSegments(laneGeo, laneMat));
   }
+}
+
+// Active lane highlights — bright lines showing WASD neighbors from current system
+const laneHighlightGroup = new THREE.Group();
+laneHighlightGroup.visible = false;
+scene.add(laneHighlightGroup);
+
+function showLaneHighlights(sysIdx) {
+  while (laneHighlightGroup.children.length) laneHighlightGroup.remove(laneHighlightGroup.children[0]);
+  if (sysIdx < 0) { laneHighlightGroup.visible = false; return; }
+
+  const from = sysWorldPos(systems[sysIdx]);
+
+  // Get camera directions for labeling
+  const camFwd = new THREE.Vector3();
+  camera.getWorldDirection(camFwd);
+  camFwd.y = 0; camFwd.normalize();
+  const camRight = new THREE.Vector3().crossVectors(camFwd, new THREE.Vector3(0, 1, 0)).normalize();
+
+  // Show lanes to all connected neighbors
+  for (const neighborIdx of laneConnections[sysIdx]) {
+    const to = sysWorldPos(systems[neighborIdx]);
+    const delta = to.clone().sub(from);
+    delta.y = 0;
+    delta.normalize();
+
+    // Determine which WASD direction this neighbor is in
+    const fwdDot = delta.dot(camFwd);
+    const rightDot = delta.dot(camRight);
+    let dirLabel = '';
+    let color = 0x335566;
+    if (Math.abs(fwdDot) > Math.abs(rightDot)) {
+      dirLabel = fwdDot > 0 ? 'W' : 'S';
+      color = fwdDot > 0 ? 0x4488aa : 0x886644;
+    } else {
+      dirLabel = rightDot > 0 ? 'D' : 'A';
+      color = rightDot > 0 ? 0x448866 : 0x664488;
+    }
+
+    // Bright lane line
+    const pts = [from.clone(), to.clone()];
+    const geo = new THREE.BufferGeometry().setFromPoints(pts);
+    const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.5, depthWrite: false });
+    laneHighlightGroup.add(new THREE.Line(geo, mat));
+
+    // Small label at midpoint showing the neighbor name
+    const mid = from.clone().lerp(to, 0.5);
+    const visited = visitedSystems.has(neighborIdx);
+    const labelCol = visited ? '#446655' : '#667788';
+    const sysName = systems[neighborIdx].name;
+    const c = document.createElement('canvas');
+    c.width = 256; c.height = 48;
+    const ctx = c.getContext('2d');
+    ctx.font = 'bold 20px Courier New';
+    ctx.fillStyle = labelCol;
+    ctx.textAlign = 'center';
+    ctx.fillText(`[${dirLabel}] ${sysName}`, 128, 32);
+    const sprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false, depthTest: false })
+    );
+    sprite.scale.set(200, 38, 1);
+    sprite.position.copy(mid);
+    sprite.position.y += 40;
+    laneHighlightGroup.add(sprite);
+  }
+
+  laneHighlightGroup.visible = true;
+}
+
+function hideLaneHighlights() {
+  while (laneHighlightGroup.children.length) laneHighlightGroup.remove(laneHighlightGroup.children[0]);
+  laneHighlightGroup.visible = false;
 }
 
 // ============================================================
@@ -1126,7 +1197,9 @@ renderer.domElement.addEventListener('pointermove', e => {
     tooltip.style.display = 'block';
     tooltip.style.left = (e.clientX + 14) + 'px';
     tooltip.style.top = (e.clientY + 14) + 'px';
-    tooltip.innerHTML = `<b>${s.name}</b><br>${s._count > 1 ? 'Binary' : 'Single'} | dist ${s.dist}`;
+    const explored = visitedSystems.has(idx);
+    const explTag = explored ? ' <span style="color:#4a7">explored</span>' : ' <span style="color:#666">unexplored</span>';
+    tooltip.innerHTML = `<b>${s.name}</b>${explTag}<br>${s._count > 1 ? 'Binary' : 'Single'} | dist ${s.dist}`;
     renderer.domElement.style.cursor = 'pointer';
   } else {
     tooltip.style.display = 'none';
@@ -1180,6 +1253,7 @@ async function navigateToSystem(idx) {
 
   showZones(targetPos, starsData);
   addPlanetsToZones(planets, primaryOffsetAU);
+  showLaneHighlights(idx);
   flyTo(targetPos, zoomDist);
   showSystemPanel(sys, starsData, envData, planets);
   trackDiscovery(planets, idx);
@@ -1509,6 +1583,7 @@ function flyTo(target, distance = 800) {
 function flyOut() {
   destroyPlanetGlobe();
   hideZones();
+  hideLaneHighlights();
   selectedIdx = -1;
   flyTo(new THREE.Vector3(0, 0, 0), 14000);
   document.getElementById('panel').style.display = 'none';
