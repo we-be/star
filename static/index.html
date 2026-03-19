@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Xandaris — Star Map</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; color: #ccc; font-family: 'Courier New', monospace; overflow: hidden; }
+canvas { display: block; }
+
+#hud {
+  position: absolute; top: 16px; left: 16px;
+  font-size: 12px; opacity: 0.7;
+}
+
+#tooltip {
+  position: absolute; pointer-events: none; display: none;
+  background: rgba(0,0,0,0.85); border: 1px solid #444;
+  padding: 6px 10px; border-radius: 4px; font-size: 12px;
+  white-space: nowrap;
+}
+
+#panel {
+  position: absolute; top: 16px; right: 16px; width: 320px;
+  background: rgba(8,8,16,0.92); border: 1px solid #333;
+  border-radius: 8px; padding: 16px; display: none;
+  max-height: calc(100vh - 32px); overflow-y: auto;
+  font-size: 13px; line-height: 1.6;
+}
+#panel h2 { color: #fff; font-size: 16px; margin-bottom: 8px; }
+#panel h3 { color: #aaa; font-size: 13px; margin: 12px 0 4px; border-bottom: 1px solid #333; padding-bottom: 2px; }
+#panel .row { display: flex; justify-content: space-between; }
+#panel .label { color: #666; }
+#panel .val { color: #eee; }
+#panel .star-block { margin: 8px 0; padding: 8px; background: rgba(255,255,255,0.03); border-radius: 4px; }
+#panel .close { position: absolute; top: 8px; right: 12px; cursor: pointer; color: #666; font-size: 18px; }
+#panel .close:hover { color: #fff; }
+
+#legend {
+  position: absolute; bottom: 16px; left: 16px;
+  font-size: 11px; opacity: 0.7;
+}
+#legend .swatch {
+  display: inline-block; width: 10px; height: 10px;
+  border-radius: 50%; margin-right: 4px; vertical-align: middle;
+}
+#legend span { margin-right: 12px; }
+
+#controls-hint {
+  position: absolute; bottom: 16px; right: 16px;
+  font-size: 11px; opacity: 0.4;
+}
+</style>
+</head>
+<body>
+<div id="hud">Loading...</div>
+<div id="tooltip"></div>
+<div id="panel"></div>
+<div id="legend">
+  <span><i class="swatch" style="background:#f48042"></i>M</span>
+  <span><i class="swatch" style="background:#ffb570"></i>K</span>
+  <span><i class="swatch" style="background:#ffe0b0"></i>G</span>
+  <span><i class="swatch" style="background:#fff5e6"></i>F</span>
+  <span><i class="swatch" style="background:#eef0ff"></i>A</span>
+  <span><i class="swatch" style="background:#b0c0ff"></i>B</span>
+  <span><i class="swatch" style="background:#8099ff"></i>O</span>
+</div>
+<div id="controls-hint">WASD hop between stars | Scroll zoom | Drag orbit | Click select | Esc galaxy</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const API = window.location.origin;
+
+// -- Stellar color --
+const COLOR_TABLE = [
+  [2000,  [1.00, 0.50, 0.26]], [3500,  [1.00, 0.71, 0.44]],
+  [5000,  [1.00, 0.88, 0.69]], [5800,  [1.00, 0.96, 0.90]],
+  [7000,  [0.93, 0.94, 1.00]], [10000, [0.69, 0.75, 1.00]],
+  [20000, [0.50, 0.60, 1.00]], [40000, [0.44, 0.53, 1.00]],
+];
+
+function tempToRGB(temp) {
+  if (temp <= COLOR_TABLE[0][0]) return COLOR_TABLE[0][1];
+  for (let i = 0; i < COLOR_TABLE.length - 1; i++) {
+    const [t0, c0] = COLOR_TABLE[i], [t1, c1] = COLOR_TABLE[i + 1];
+    if (temp <= t1) {
+      const t = (temp - t0) / (t1 - t0);
+      return [c0[0]+(c1[0]-c0[0])*t, c0[1]+(c1[1]-c0[1])*t, c0[2]+(c1[2]-c0[2])*t];
+    }
+  }
+  return COLOR_TABLE[COLOR_TABLE.length - 1][1];
+}
+
+function rgbHex(rgb) {
+  return '#' + rgb.map(c => Math.round(c * 255).toString(16).padStart(2, '0')).join('');
+}
+
+// -- Scene --
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 200000);
+camera.position.set(0, 6000, 14000);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(devicePixelRatio);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 5;
+controls.maxDistance = 100000;
+
+// Background dust
+const bgGeo = new THREE.BufferGeometry();
+const bgPos = new Float32Array(3000 * 3);
+for (let i = 0; i < bgPos.length; i++) bgPos[i] = (Math.random() - 0.5) * 80000;
+bgGeo.setAttribute('position', new THREE.BufferAttribute(bgPos, 3));
+scene.add(new THREE.Points(bgGeo, new THREE.PointsMaterial({ color: 0x333344, size: 1 })));
+
+// Grid
+const grid = new THREE.GridHelper(20000, 20, 0x111122, 0x0a0a15);
+grid.material.transparent = true; grid.material.opacity = 0.3;
+scene.add(grid);
+
+// Origin
+const originRing = new THREE.Mesh(
+  new THREE.RingGeometry(30, 35, 32),
+  new THREE.MeshBasicMaterial({ color: 0x334455, side: THREE.DoubleSide, transparent: true, opacity: 0.5 })
+);
+originRing.rotation.x = -Math.PI / 2;
+scene.add(originRing);
+
+// -- Load data --
+const [systemsRaw, starsRaw] = await Promise.all([
+  fetch(`${API}/systems/nearest?x=0&y=0&z=0&limit=2000`).then(r => r.json()),
+  fetch(`${API}/stars/nearest?x=0&y=0&z=0&limit=5000`).then(r => r.json()),
+]);
+
+const starsByPos = {};
+for (const star of starsRaw) {
+  const key = `${star.pos_x},${star.pos_y},${star.pos_z}`;
+  (starsByPos[key] ||= []).push(star);
+}
+
+const systems = systemsRaw.map(sys => {
+  const key = `${sys.pos_x},${sys.pos_y},${sys.pos_z}`;
+  const sysStars = starsByPos[key] || [];
+  const primary = sysStars.reduce((a, b) => (a && a.mass > b.mass) ? a : b, sysStars[0]);
+  return { ...sys, _temp: primary?.temp || 5000, _lum: primary?.luminosity || 1000, _count: sysStars.length };
+});
+
+// -- Point cloud --
+const count = systems.length;
+const positions = new Float32Array(count * 3);
+const colors = new Float32Array(count * 3);
+const sizes = new Float32Array(count);
+
+function sysWorldPos(s) { return new THREE.Vector3(s.pos_x, s.pos_z * 3, s.pos_y); }
+
+for (let i = 0; i < count; i++) {
+  const s = systems[i];
+  const p = sysWorldPos(s);
+  positions[i*3] = p.x; positions[i*3+1] = p.y; positions[i*3+2] = p.z;
+  const [r, g, b] = tempToRGB(s._temp);
+  colors[i*3] = r; colors[i*3+1] = g; colors[i*3+2] = b;
+  sizes[i] = 4 + Math.log10(Math.max(1, s._lum)) * 3;
+}
+
+const pointsGeo = new THREE.BufferGeometry();
+pointsGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+pointsGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+pointsGeo.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+
+const pointsMat = new THREE.ShaderMaterial({
+  vertexColors: true, transparent: true, depthWrite: false, uniforms: {},
+  vertexShader: `
+    attribute float size; varying vec3 vColor;
+    void main() {
+      vColor = color;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = size * (3000.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    varying vec3 vColor;
+    void main() {
+      float d = length(gl_PointCoord - 0.5) * 2.0;
+      if (d > 1.0) discard;
+      float glow = exp(-d * d * 3.0);
+      float core = smoothstep(0.5, 0.0, d);
+      vec3 col = vColor * (glow * 0.6 + core * 0.8);
+      gl_FragColor = vec4(col, glow * 0.7 + core * 0.5);
+    }`
+});
+
+const pointCloud = new THREE.Points(pointsGeo, pointsMat);
+scene.add(pointCloud);
+
+// ============================================================
+// ZONE VISUALIZATION
+// ============================================================
+const ZONE_SCALE = 80; // 1 AU = 80 scene units
+const zoneGroup = new THREE.Group();
+zoneGroup.visible = false;
+scene.add(zoneGroup);
+
+function makeCircle(radius, color, opacity) {
+  const pts = [];
+  for (let i = 0; i <= 128; i++) {
+    const a = (i / 128) * Math.PI * 2;
+    pts.push(new THREE.Vector3(Math.cos(a) * radius, 0, Math.sin(a) * radius));
+  }
+  return new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(pts),
+    new THREE.LineBasicMaterial({ color, transparent: true, opacity, depthWrite: false })
+  );
+}
+
+function makeBand(innerR, outerR, color, opacity) {
+  const mesh = new THREE.Mesh(
+    new THREE.RingGeometry(innerR, outerR, 96),
+    new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide, transparent: true, opacity, depthWrite: false })
+  );
+  mesh.rotation.x = -Math.PI / 2;
+  return mesh;
+}
+
+function makeLabel(text, x, z, color) {
+  const c = document.createElement('canvas');
+  c.width = 512; c.height = 64;
+  const ctx = c.getContext('2d');
+  ctx.font = 'bold 28px Courier New';
+  ctx.fillStyle = color;
+  ctx.textAlign = 'center';
+  ctx.fillText(text, 256, 44);
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false, depthTest: false })
+  );
+  sprite.scale.set(140, 18, 1);
+  sprite.position.set(x, 20, z);
+  return sprite;
+}
+
+function makeStarMesh(radiusSolar, temp) {
+  const r = Math.max(1.5, Math.sqrt(radiusSolar / 1000) * 5);
+  const [cr, cg, cb] = tempToRGB(temp);
+  const col = new THREE.Color(cr, cg, cb);
+
+  const group = new THREE.Group();
+
+  // Solid core
+  group.add(new THREE.Mesh(
+    new THREE.SphereGeometry(r, 32, 32),
+    new THREE.MeshBasicMaterial({ color: col })
+  ));
+
+  // Glow — additive blended sphere, no depth writes
+  group.add(new THREE.Mesh(
+    new THREE.SphereGeometry(r * 3, 32, 32),
+    new THREE.MeshBasicMaterial({
+      color: col, transparent: true, opacity: 0.12,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    })
+  ));
+  group.add(new THREE.Mesh(
+    new THREE.SphereGeometry(r * 6, 32, 32),
+    new THREE.MeshBasicMaterial({
+      color: col, transparent: true, opacity: 0.04,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    })
+  ));
+
+  return group;
+}
+
+function showZones(center, starsData) {
+  while (zoneGroup.children.length) zoneGroup.remove(zoneGroup.children[0]);
+  zoneGroup.position.copy(center);
+
+  const primary = starsData.find(s => s.is_primary) || starsData[0];
+  if (!primary) return;
+
+  // Find companion if binary
+  const companion = starsData.find(s => !s.is_primary);
+
+  // Total binary separation = primary SMA + companion SMA (both orbit barycenter)
+  let totalSepAU = 0;
+  let primaryOffset = 0;
+  let companionOffset = 0;
+  if (companion) {
+    const pSMA = (primary.semi_major_axis || 0) / 1000;
+    const cSMA = (companion.semi_major_axis || 0) / 1000;
+    totalSepAU = pSMA + cSMA;
+    // Place primary left of center, companion right
+    primaryOffset = -pSMA;
+    companionOffset = cSMA;
+  }
+
+  // Primary star
+  const primaryMesh = makeStarMesh(primary.radius || 1000, primary.temp);
+  primaryMesh.position.set(primaryOffset * ZONE_SCALE, 0, 0);
+  zoneGroup.add(primaryMesh);
+
+  // Primary name label
+  const pRgb = tempToRGB(primary.temp);
+  zoneGroup.add(makeLabel(
+    `${primary.star_name} (${primary.spectral_name}${primary.luminosity_numeral})`,
+    primaryOffset * ZONE_SCALE, -25, rgbHex(pRgb)
+  ));
+
+  // Primary habitable zone
+  const hzIn = primary.habitable_inner / 1000;
+  const hzOut = primary.habitable_outer / 1000;
+  if (hzIn > 0 && hzOut > 0) {
+    const band = makeBand(hzIn * ZONE_SCALE, hzOut * ZONE_SCALE, 0x22aa44, 0.1);
+    band.position.x = primaryOffset * ZONE_SCALE;
+    zoneGroup.add(band);
+    zoneGroup.add(makeCircle(hzIn * ZONE_SCALE, 0x22aa44, 0.35).translateX(primaryOffset * ZONE_SCALE));
+    zoneGroup.add(makeCircle(hzOut * ZONE_SCALE, 0x22aa44, 0.35).translateX(primaryOffset * ZONE_SCALE));
+    zoneGroup.add(makeLabel(
+      `HZ ${hzIn.toFixed(2)}\u2013${hzOut.toFixed(2)} AU`,
+      primaryOffset * ZONE_SCALE, (hzOut * ZONE_SCALE + 20), '#22aa44'
+    ));
+  }
+
+  // Primary frost line
+  const fl = primary.frost_line / 1000;
+  if (fl > 0) {
+    zoneGroup.add(makeCircle(fl * ZONE_SCALE, 0x4488cc, 0.4).translateX(primaryOffset * ZONE_SCALE));
+    zoneGroup.add(makeLabel(`Frost ${fl.toFixed(2)} AU`, primaryOffset * ZONE_SCALE, (fl * ZONE_SCALE + 20), '#4488cc'));
+  }
+
+  // Companion star
+  if (companion && totalSepAU > 0) {
+    const compMesh = makeStarMesh(companion.radius || 500, companion.temp);
+    compMesh.position.set(companionOffset * ZONE_SCALE, 0, 0);
+    zoneGroup.add(compMesh);
+
+    // Companion label
+    const cRgb = tempToRGB(companion.temp);
+    zoneGroup.add(makeLabel(
+      `${companion.star_name} (${companion.spectral_name}${companion.luminosity_numeral})`,
+      companionOffset * ZONE_SCALE, -25, rgbHex(cRgb)
+    ));
+
+    // Companion HZ
+    const cHzIn = companion.habitable_inner / 1000;
+    const cHzOut = companion.habitable_outer / 1000;
+    if (cHzIn > 0 && cHzOut > 0) {
+      const cBand = makeBand(cHzIn * ZONE_SCALE, cHzOut * ZONE_SCALE, 0x227744, 0.07);
+      cBand.position.x = companionOffset * ZONE_SCALE;
+      zoneGroup.add(cBand);
+      zoneGroup.add(makeCircle(cHzIn * ZONE_SCALE, 0x227744, 0.25).translateX(companionOffset * ZONE_SCALE));
+      zoneGroup.add(makeCircle(cHzOut * ZONE_SCALE, 0x227744, 0.25).translateX(companionOffset * ZONE_SCALE));
+    }
+
+    // Companion frost line
+    const cFl = companion.frost_line / 1000;
+    if (cFl > 0) {
+      zoneGroup.add(makeCircle(cFl * ZONE_SCALE, 0x336688, 0.25).translateX(companionOffset * ZONE_SCALE));
+    }
+
+    // Binary orbit circle (centered on barycenter = group origin)
+    zoneGroup.add(makeCircle(totalSepAU * ZONE_SCALE * 0.5, 0x555555, 0.15));
+    zoneGroup.add(makeLabel(`sep ${totalSepAU.toFixed(1)} AU`, 0, (totalSepAU * ZONE_SCALE * 0.5 + 20), '#666666'));
+  }
+
+  zoneGroup.visible = true;
+}
+
+function hideZones() { zoneGroup.visible = false; }
+
+// -- HUD --
+const binaryCount = systems.filter(s => s._count > 1).length;
+document.getElementById('hud').textContent =
+  `${count} systems | ${starsRaw.length} stars | ${binaryCount} binary`;
+
+// -- Raycaster (adaptive threshold) --
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+
+function getHovered(e) {
+  mouse.x = (e.clientX / innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / innerHeight) * 2 + 1;
+  const camDist = camera.position.distanceTo(controls.target);
+  raycaster.params.Points.threshold = Math.max(30, camDist * 0.012);
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObject(pointCloud);
+  return hits.length > 0 ? hits[0].index : -1;
+}
+
+const tooltip = document.getElementById('tooltip');
+renderer.domElement.addEventListener('pointermove', e => {
+  const idx = getHovered(e);
+  if (idx >= 0) {
+    const s = systems[idx];
+    tooltip.style.display = 'block';
+    tooltip.style.left = (e.clientX + 14) + 'px';
+    tooltip.style.top = (e.clientY + 14) + 'px';
+    tooltip.innerHTML = `<b>${s.name}</b><br>${s._count > 1 ? 'Binary' : 'Single'} | dist ${s.dist}`;
+    renderer.domElement.style.cursor = 'pointer';
+  } else {
+    tooltip.style.display = 'none';
+    renderer.domElement.style.cursor = 'default';
+  }
+});
+
+// -- Navigate to a system (shared by click + WASD) --
+let selectedIdx = -1;
+let navigating = false;
+
+async function navigateToSystem(idx) {
+  if (navigating || idx < 0 || idx >= systems.length) return;
+  navigating = true;
+  selectedIdx = idx;
+  const sys = systems[idx];
+  const targetPos = sysWorldPos(sys);
+
+  const [starsData, envData] = await Promise.all([
+    fetch(`${API}/systems/${sys.id}/stars`).then(r => r.json()),
+    fetch(`${API}/systems/${sys.id}/environment`).then(r => r.json()).catch(() => null),
+  ]);
+
+  const primary = starsData.find(s => s.is_primary) || starsData[0];
+  let maxAU = (primary?.frost_line || 3000) / 1000;
+  for (const s of starsData) {
+    if (s.semi_major_axis) maxAU = Math.max(maxAU, (s.semi_major_axis) / 1000);
+  }
+  const zoomDist = Math.max(200, maxAU * ZONE_SCALE * 2.5);
+
+  showZones(targetPos, starsData);
+  flyTo(targetPos, zoomDist);
+  showPanel(sys, starsData, envData);
+  navigating = false;
+}
+
+// Find nearest system in a direction relative to camera view
+function findNeighbor(fromIdx, direction) {
+  // direction: 'forward' | 'back' | 'left' | 'right'
+  const from = sysWorldPos(systems[fromIdx]);
+
+  // Camera's forward/right projected onto XZ plane
+  const camForward = new THREE.Vector3();
+  camera.getWorldDirection(camForward);
+  camForward.y = 0; camForward.normalize();
+  const camRight = new THREE.Vector3().crossVectors(camForward, new THREE.Vector3(0, 1, 0)).normalize();
+
+  let dirVec;
+  if (direction === 'forward')  dirVec = camForward;
+  else if (direction === 'back') dirVec = camForward.clone().negate();
+  else if (direction === 'left') dirVec = camRight.clone().negate();
+  else dirVec = camRight;
+
+  let bestIdx = -1, bestScore = -Infinity;
+
+  for (let i = 0; i < systems.length; i++) {
+    if (i === fromIdx) continue;
+    const p = sysWorldPos(systems[i]);
+    const delta = p.clone().sub(from);
+    const dist = delta.length();
+    if (dist < 1) continue;
+
+    // Dot product with direction — how much is this star "in front" in the desired direction
+    delta.normalize();
+    const dot = delta.dot(dirVec);
+
+    // Only consider stars roughly in the right half-space (dot > 0.3)
+    if (dot < 0.3) continue;
+
+    // Score: prefer close + aligned. Weighted: alignment matters more than distance.
+    const score = dot * 2.0 - dist / 5000;
+    if (score > bestScore) {
+      bestScore = score;
+      bestIdx = i;
+    }
+  }
+  return bestIdx;
+}
+
+renderer.domElement.addEventListener('click', e => {
+  const idx = getHovered(e);
+  if (idx >= 0) navigateToSystem(idx);
+});
+
+// -- Info panel --
+function showPanel(sys, stars, env) {
+  const p = document.getElementById('panel');
+  const fmt = (v, u, d=1) => `${(v/d).toFixed(d>1?3:0)} ${u}`;
+
+  let h = `<span class="close" onclick="flyOut()">&times;</span>`;
+  h += `<div style="margin-bottom:8px"><button onclick="flyOut()" style="background:#1a1a2e;color:#6688aa;border:1px solid #333;padding:4px 10px;border-radius:4px;cursor:pointer;font-family:inherit;font-size:12px">&#8592; Galaxy</button></div>`;
+  h += `<h2>${sys.name}</h2>`;
+  h += `<div class="row"><span class="label">Position</span><span class="val">(${sys.pos_x}, ${sys.pos_y}, ${sys.pos_z})</span></div>`;
+  h += `<div class="row"><span class="label">Distance</span><span class="val">${sys.dist} units</span></div>`;
+  h += `<div class="row"><span class="label">Stars</span><span class="val">${stars.length}${stars.length > 1 ? ' (binary)' : ''}</span></div>`;
+
+  if (env) {
+    h += `<h3>Stellar Environment</h3>`;
+    h += `<div class="row"><span class="label">Spectral</span><span class="val">${env.spectral_name} ${env.lifecycle_name}</span></div>`;
+    h += `<div class="row"><span class="label">Metallicity</span><span class="val">${fmt(env.metallicity,'dex',1000)}</span></div>`;
+  }
+
+  for (const star of stars) {
+    const hex = rgbHex(tempToRGB(star.temp));
+    h += `<div class="star-block" style="border-left: 3px solid ${hex}">`;
+    h += `<b>${star.star_name}</b> <span style="color:${hex}">${star.spectral_name} ${star.luminosity_numeral}</span>`;
+    h += star.is_primary ? ' <span style="color:#555">(primary)</span>' : ' <span style="color:#555">(companion)</span>';
+    h += `<div class="row"><span class="label">Mass</span><span class="val">${fmt(star.mass,'M\u2609',1000)}</span></div>`;
+    h += `<div class="row"><span class="label">Radius</span><span class="val">${fmt(star.radius,'R\u2609',1000)}</span></div>`;
+    h += `<div class="row"><span class="label">Temp</span><span class="val">${star.temp} K</span></div>`;
+    h += `<div class="row"><span class="label">Luminosity</span><span class="val">${fmt(star.luminosity,'L\u2609',1000)}</span></div>`;
+    h += `<div class="row"><span class="label">Flares</span><span class="val">${star.flare_frequency}/yr</span></div>`;
+    h += `<div class="row"><span class="label">Solar wind</span><span class="val">${star.solar_wind}%</span></div>`;
+    if (!star.is_primary && star.semi_major_axis > 0) {
+      h += `<h3>Binary Orbit</h3>`;
+      h += `<div class="row"><span class="label">Separation</span><span class="val">${fmt(star.semi_major_axis,'AU',1000)}</span></div>`;
+      h += `<div class="row"><span class="label">Eccentricity</span><span class="val">${(star.eccentricity/10000).toFixed(3)}</span></div>`;
+      h += `<div class="row"><span class="label">Period</span><span class="val">${fmt(star.orbital_period,'yr',1000)}</span></div>`;
+    }
+    h += `</div>`;
+  }
+
+  p.innerHTML = h;
+  p.style.display = 'block';
+}
+
+// -- Fly-to camera --
+let flyAnim = null;
+
+function flyTo(target, distance = 800) {
+  if (flyAnim) { cancelAnimationFrame(flyAnim); flyAnim = null; }
+  const startPos = camera.position.clone();
+  const startTarget = controls.target.clone();
+  const dir = new THREE.Vector3().subVectors(startPos, target).normalize();
+  const endPos = target.clone().addScaledVector(dir, distance);
+  const endTarget = target.clone();
+  const t0 = performance.now();
+
+  (function tick(now) {
+    const t = Math.min(1, (now - t0) / 1200);
+    const e = 1 - Math.pow(1 - t, 3);
+    camera.position.lerpVectors(startPos, endPos, e);
+    controls.target.lerpVectors(startTarget, endTarget, e);
+    controls.update();
+    if (t < 1) flyAnim = requestAnimationFrame(tick);
+    else flyAnim = null;
+  })(t0);
+}
+
+function flyOut() {
+  hideZones();
+  selectedIdx = -1;
+  flyTo(new THREE.Vector3(0, 0, 0), 14000);
+  document.getElementById('panel').style.display = 'none';
+}
+window.flyOut = flyOut;
+
+// -- WASD star navigation --
+const wasdCooldown = {};
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+
+  if (k === 'escape') { flyOut(); return; }
+
+  // WASD: hop to neighboring star
+  if (['w','a','s','d'].includes(k) && selectedIdx >= 0 && !navigating) {
+    // Debounce: one hop per keypress
+    if (wasdCooldown[k]) return;
+    wasdCooldown[k] = true;
+
+    const dir = { w: 'forward', s: 'back', a: 'left', d: 'right' }[k];
+    const neighbor = findNeighbor(selectedIdx, dir);
+    if (neighbor >= 0) navigateToSystem(neighbor);
+  }
+
+  // If no star selected, WASD picks the nearest star to camera target
+  if (['w','a','s','d'].includes(k) && selectedIdx < 0 && !navigating) {
+    if (wasdCooldown[k]) return;
+    wasdCooldown[k] = true;
+    // Find nearest system to where camera is looking
+    const target = controls.target.clone();
+    let bestIdx = 0, bestDist = Infinity;
+    for (let i = 0; i < systems.length; i++) {
+      const d = sysWorldPos(systems[i]).distanceTo(target);
+      if (d < bestDist) { bestDist = d; bestIdx = i; }
+    }
+    navigateToSystem(bestIdx);
+  }
+});
+
+addEventListener('keyup', e => { wasdCooldown[e.key.toLowerCase()] = false; });
+
+// -- Resize --
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// -- Render loop --
+(function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+})();
+</script>
+</body>
+</html>
